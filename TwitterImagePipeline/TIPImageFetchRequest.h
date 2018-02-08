@@ -6,16 +6,21 @@
 //  Copyright © 2016 Twitter. All rights reserved.
 //
 
-#import "TIPDefinitions.h"
-#import "TIPProgressive.h"
+#import <TwitterImagePipeline/TIPDefinitions.h>
+#import <TwitterImagePipeline/TIPProgressive.h>
 
 @protocol TIPImageFetchOperationUnderlyingContext;
+@protocol TIPImageFetchTransformer;
+
+NS_ASSUME_NONNULL_BEGIN
+
+FOUNDATION_EXTERN const NSTimeInterval TIPTimeToLiveDefault; // 30 days
 
 //! Block to call with the hydrated `NSURLRequest` when hydration is triggered
 typedef void(^TIPImageFetchHydrationCompletionBlock)(NSURLRequest * __nullable hydratedRequest, NSError * __nullable error);
 
 //! Block to hydrate an `NSURLRequest` for a given _context_
-typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest * __nonnull requestToHydrate, id<TIPImageFetchOperationUnderlyingContext> __nonnull context, TIPImageFetchHydrationCompletionBlock __nonnull complete);
+typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest *requestToHydrate, id<TIPImageFetchOperationUnderlyingContext> context, TIPImageFetchHydrationCompletionBlock complete);
 
 /** Options for a `TIPImageFetchRequest` */
  typedef NS_OPTIONS(NSInteger, TIPImageFetchOptions)
@@ -42,7 +47,7 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest * __nonnull requestToHyd
 @required
 
 /** The only required property is the `NSURL` of the image to load from the _Network_. */
-@property (nonnull, nonatomic, readonly) NSURL *imageURL;
+@property (nonatomic, readonly) NSURL *imageURL;
 
 @optional
 
@@ -51,7 +56,7 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest * __nonnull requestToHyd
  This will be used for matching against existing cached images.
  If not provided (or `nil`), `[imageURL absoluteString]` will be used instead.
  */
-@property (nullable, nonatomic, readonly, copy) NSString *imageIdentifier;
+@property (nonatomic, readonly, copy, nullable) NSString *imageIdentifier;
 
 /**
  The pixel dimensions (not points) of the target for displaying the image.
@@ -75,6 +80,7 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest * __nonnull requestToHyd
  dimensions.
  See `UIViewContentModeScaleToFill`, `UIViewContentModeScaleAspectFit` and/or
  `UIViewContentModeScaleAspectFill` for constrained content modes.
+ @note only _targetContentMode_ values that have `UIViewContentModeScale*` will be scaled (others are just positional and do not scale)
  */
 @property (nonatomic, readonly) UIViewContentMode targetContentMode;
 
@@ -98,7 +104,14 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest * __nonnull requestToHyd
  Fallback is `[TIPImageFetchProgressiveLoadingPolicy defaultProgressiveLoadingPolicies]`
  See `TIPImageFetchDelegate` and `TIPImageTypes.h`
  */
-@property (nullable, nonatomic, readonly, copy) NSDictionary<NSString *, id<TIPImageFetchProgressiveLoadingPolicy>> *progressiveLoadingPolicies;
+@property (nonatomic, readonly, copy, nullable) NSDictionary<NSString *, id<TIPImageFetchProgressiveLoadingPolicy>> *progressiveLoadingPolicies;
+
+/**
+ Provide a `TIPImageFetchTransformer` to support transforming the fetched image.
+ @note providing a transformer will scope what synchronous render cached images can be fetched
+ based on the `tip_transformerIdentifier` of the transformer.
+ */
+@property (nonatomic, readonly, nullable) id<TIPImageFetchTransformer> transformer;
 
 /**
  Specify where to load from.
@@ -114,7 +127,13 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest * __nonnull requestToHyd
  otherwise doing so will yield an error.
  Default == `nil`
  */
-@property (nullable, nonatomic, copy, readonly) TIPImageFetchHydrationBlock imageRequestHydrationBlock;
+@property (nonatomic, readonly, copy, nullable) TIPImageFetchHydrationBlock imageRequestHydrationBlock;
+
+/**
+ An optional decoder config map.
+ Can be useful for custom decoder behavior.
+ */
+@property (nonatomic, readonly, copy, nullable) NSDictionary<NSString *, id> *decoderConfigMap;
 
 @end
 
@@ -139,3 +158,56 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest * __nonnull requestToHyd
 @property (nonatomic) UIViewContentMode targetContentMode;
 
 @end
+
+@class TIPMutableGenericImageFetchRequest;
+
+/**
+ * Generic fetch request
+ */
+@interface TIPGenericImageFetchRequest : NSObject <TIPImageFetchRequest, NSCopying, NSMutableCopying>
+
+@property (nonatomic, readonly) NSURL *imageURL;
+@property (nonatomic, readonly, copy, nullable) NSString *imageIdentifier;
+@property (nonatomic, readonly) CGSize targetDimensions;
+@property (nonatomic, readonly) UIViewContentMode targetContentMode;
+@property (nonatomic, readonly) NSTimeInterval timeToLive;
+@property (nonatomic, readonly) TIPImageFetchOptions options;
+@property (nonatomic, readonly, copy, nullable) NSDictionary<NSString *, id<TIPImageFetchProgressiveLoadingPolicy>> *progressiveLoadingPolicies;
+@property (nonatomic, readonly, nullable) id<TIPImageFetchTransformer> transformer;
+@property (nonatomic, readonly) TIPImageFetchLoadingSources loadingSources;
+@property (nonatomic, readonly, copy, nullable) TIPImageFetchHydrationBlock imageRequestHydrationBlock;
+@property (nonatomic, readonly, copy, nullable) NSDictionary<NSString *, id> *decoderConfigMap;
+
+- (instancetype)initWithImageURL:(NSURL *)imageURL identifier:(nullable NSString *)imageIdentifier targetDimensions:(CGSize)dims targetContentMode:(UIViewContentMode)mode;
+- (instancetype)initWithImageURL:(NSURL *)imageURL NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+- (TIPGenericImageFetchRequest *)copy;
+- (TIPGenericImageFetchRequest *)copyWithZone:(nullable NSZone *)zone;
+
+- (TIPMutableGenericImageFetchRequest *)mutableCopy;
+- (TIPMutableGenericImageFetchRequest *)mutableCopyWithZone:(nullable NSZone *)zone;
+
+@end
+
+/**
+ * Generic fetch request (mutable)
+ */
+@interface TIPMutableGenericImageFetchRequest : TIPGenericImageFetchRequest <TIPMutableTargetSizingImageFetchRequest>
+
+@property (nonatomic) NSURL *imageURL;
+@property (nonatomic, copy, nullable) NSString *imageIdentifier;
+@property (nonatomic) CGSize targetDimensions;
+@property (nonatomic) UIViewContentMode targetContentMode;
+@property (nonatomic) NSTimeInterval timeToLive;
+@property (nonatomic) TIPImageFetchOptions options;
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, id<TIPImageFetchProgressiveLoadingPolicy>> *progressiveLoadingPolicies;
+@property (nonatomic, nullable) id<TIPImageFetchTransformer> transformer;
+@property (nonatomic) TIPImageFetchLoadingSources loadingSources;
+@property (nonatomic, copy, nullable) TIPImageFetchHydrationBlock imageRequestHydrationBlock;
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, id> *decoderConfigMap;
+
+@end
+
+NS_ASSUME_NONNULL_END

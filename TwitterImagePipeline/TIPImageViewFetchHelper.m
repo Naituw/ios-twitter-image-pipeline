@@ -16,6 +16,10 @@
 #import "TIPImagePipeline.h"
 #import "TIPImageViewFetchHelper.h"
 
+#import "UIImage+TIPAdditions.h"
+
+NS_ASSUME_NONNULL_BEGIN
+
 NSString * const TIPImageViewDidUpdateDebugInfoVisibilityNotification = @"TIPImageViewDidUpdateDebugInfoVisibility";
 NSString * const TIPImageViewDidUpdateDebugInfoVisibilityNotificationKeyVisible = @"visible";
 
@@ -24,24 +28,39 @@ NSString * const TIPImageViewDidUpdateDebugInfoVisibilityNotificationKeyVisible 
 
 static BOOL sDebugInfoVisible = NO;
 
-NS_INLINE BOOL TIPIsViewVisible(UIView *view)
+NS_INLINE BOOL TIPIsViewVisible(UIView * __nullable view)
 {
-    return view.window != nil && !view.isHidden;
+    return view != nil && view.window != nil && !view.isHidden;
 }
 
 @interface TIPImageViewSimpleFetchRequest : NSObject <TIPImageFetchRequest>
-@property (nonnull, nonatomic, readonly) NSURL *imageURL;
+@property (nonatomic, readonly) NSURL *imageURL;
 @property (nonatomic, readonly) CGSize targetDimensions;
 @property (nonatomic, readonly) UIViewContentMode targetContentMode;
-- (nonnull instancetype)initWithImageURL:(nonnull NSURL *)imageURL targetView:(nullable UIView *)view;
+- (instancetype)initWithImageURL:(NSURL *)imageURL targetView:(nullable UIView *)view;
 @end
 
 @interface TIPImageViewFetchHelper () <TIPImageFetchDelegate>
 @property (nonatomic) float fetchProgress;
 @property (nonatomic, nullable) NSError *fetchError;
 @property (nonatomic, nullable) TIPImageFetchMetrics *fetchMetrics;
+@property (nonatomic) CGSize fetchResultDimensions;
 @property (nonatomic) TIPImageLoadSource fetchSource;
 @property (nonatomic, nullable) id<TIPImageFetchRequest> fetchRequest;
+@property (atomic, weak, nullable) id<TIPImageViewFetchHelperDelegate> atomicDelegate;
+
+- (BOOL)_tip_shouldUpdateImageWithPreviewImageResult:(id<TIPImageFetchResult>)previewImageResult;
+- (BOOL)_tip_shouldContinueLoadingAfterFetchingPreviewImageResult:(id<TIPImageFetchResult>)previewImageResult;
+- (BOOL)_tip_shouldLoadProgressivelyWithIdentifier:(NSString *)identifier URL:(NSURL *)URL imageType:(NSString *)imageType originalDimensions:(CGSize)originalDimensions;
+- (BOOL)_tip_shouldReloadAfterDifferentFetchCompletedWithImage:(UIImage *)image dimensions:(CGSize)dimensions identifier:(NSString *)identifier URL:(NSURL *)URL treatedAsPlaceholder:(BOOL)placeholder manuallyStored:(BOOL)manuallyStored;
+
+- (void)_tip_didStartLoading;
+- (void)_tip_didUpdateProgress:(float)progress;
+- (void)_tip_didUpdateDisplayedImage:(UIImage *)image fromSourceDimensions:(CGSize)size isFinal:(BOOL)isFinal;
+- (void)_tip_didLoadFinalImageFromSource:(TIPImageLoadSource)source;
+- (void)_tip_didFailToLoadFinalImage:(NSError *)error;
+- (void)_tip_didReset;
+
 @end
 
 @implementation TIPImageViewFetchHelper
@@ -69,10 +88,10 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     return [self initWithDelegate:nil dataSource:nil];
 }
 
-- (instancetype)initWithDelegate:(id<TIPImageViewFetchHelperDelegate>)delegate dataSource:(id<TIPImageViewFetchHelperDataSource>)dataSource
+- (instancetype)initWithDelegate:(nullable id<TIPImageViewFetchHelperDelegate>)delegate dataSource:(nullable id<TIPImageViewFetchHelperDataSource>)dataSource
 {
     if (self = [super init]) {
-        _delegate = delegate;
+        [self _tip_setDelegate:delegate];
         _dataSource = dataSource;
         [self _tip_prep];
     }
@@ -114,7 +133,24 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     return _flags.isLoadedImageFinal || _flags.isLoadedImageScaled || _flags.isLoadedImageProgressive || _flags.isLoadedImagePreview;
 }
 
-- (void)setFetchImageView:(UIImageView *)fetchImageView
+- (void)setDelegate:(nullable id<TIPImageViewFetchHelperDelegate>)delegate
+{
+    [self _tip_setDelegate:delegate];
+}
+
+- (void)_tip_setDelegate:(nullable id<TIPImageViewFetchHelperDelegate>)delegate
+{
+    _delegate = delegate;
+
+    // Certain callbacks are made via non-main thread and require atomic property backing
+    if ([delegate respondsToSelector:@selector(tip_fetchHelper:shouldLoadProgressivelyWithIdentifier:URL:imageType:originalDimensions:)]) {
+        self.atomicDelegate = delegate;
+    } else {
+        self.atomicDelegate = nil;
+    }
+}
+
+- (void)setFetchImageView:(nullable UIImageView *)fetchImageView
 {
     UIImageView *oldView = _fetchImageView;
     if (oldView != fetchImageView) {
@@ -187,9 +223,28 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
+- (void)setImageAsIfPlaceholder:(UIImage *)image
+{
+    [self cancelFetchRequest];
+    [self _tip_startObservingImagePipeline:nil];
+    self.fetchImageView.image = image;
+    [self markAsIfPlaceholder];
+}
+
+- (void)markAsIfPlaceholder
+{
+    if (self.fetchImageView.image) {
+        _flags.isLoadedImageFinal = NO;
+        _flags.isLoadedImageScaled = NO;
+        _flags.isLoadedImagePreview = NO;
+        _flags.isLoadedImageProgressive = NO;
+        _flags.treatAsPlaceholder = YES;
+    }
+}
+
 #pragma mark Helpers
 
-+ (void)transitionView:(UIImageView *)imageView fromFetchHelper:(TIPImageViewFetchHelper *)fromHelper toFetchHelper:(TIPImageViewFetchHelper *)toHelper
++ (void)transitionView:(UIImageView *)imageView fromFetchHelper:(nullable TIPImageViewFetchHelper *)fromHelper toFetchHelper:(nullable TIPImageViewFetchHelper *)toHelper
 {
     if (fromHelper == toHelper || !toHelper) {
         return;
@@ -213,29 +268,32 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     fromHelper.fetchImageView = nil;
 }
 
-- (void)setViewHidden:(BOOL)hidden
+
+- (void)triggerViewWillChangeHidden
 {
     UIView *view = self.fetchImageView;
     if (view.window != nil) {
-        if (view.isHidden != hidden) {
-            if (hidden) {
-                [self triggerViewWillDisappear];
-            } else {
-                [self triggerViewWillAppear];
-            }
-            view.hidden = hidden;
-            if (hidden) {
-                [self triggerViewDidDisappear];
-            } else {
-                [self triggerViewDidAppear];
-            }
+        if (view.isHidden) {
+            [self triggerViewWillAppear];
+        } else {
+            [self triggerViewWillDisappear];
         }
-    } else {
-        view.hidden = hidden;
     }
 }
 
-- (void)viewWillMoveToWindow:(UIWindow *)newWindow
+- (void)triggerViewDidChangeHidden
+{
+    UIView *view = self.fetchImageView;
+    if (view.window != nil) {
+        if (view.isHidden) {
+            [self triggerViewDidDisappear];
+        } else {
+            [self triggerViewDidAppear];
+        }
+    }
+}
+
+- (void)triggerViewWillMoveToWindow:(nullable UIWindow *)newWindow
 {
     UIView *imageView = self.fetchImageView;
     if (TIPIsViewVisible(imageView) && !newWindow) {
@@ -247,7 +305,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (void)viewDidMoveToWindow
+- (void)triggerViewDidMoveToWindow
 {
     UIView *imageView = self.fetchImageView;
     if (_flags.transitioningAppearance) {
@@ -325,7 +383,8 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     _flags.transitioningAppearance = 1;
     if (!_fetchOperation) {
         if (!_flags.isLoadedImageFinal) {
-            [self _tip_resetImage:self.fetchImageView.image];
+            [self cancelFetchRequest];
+            [self _tip_startObservingImagePipeline:nil];
             [self _tip_refetch:nil];
         }
     } else {
@@ -343,7 +402,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
 
 #pragma mark Events
 
-- (BOOL)shouldUpdateImageWithPreviewImageResult:(id<TIPImageFetchResult>)previewImageResult
+- (BOOL)_tip_shouldUpdateImageWithPreviewImageResult:(id<TIPImageFetchResult>)previewImageResult
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:shouldUpdateImageWithPreviewImageResult:)]) {
@@ -352,7 +411,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     return NO;
 }
 
-- (BOOL)shouldContinueLoadingAfterFetchingPreviewImageResult:(id<TIPImageFetchResult>)previewImageResult
+- (BOOL)_tip_shouldContinueLoadingAfterFetchingPreviewImageResult:(id<TIPImageFetchResult>)previewImageResult
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:shouldContinueLoadingAfterFetchingPreviewImageResult:)]) {
@@ -378,16 +437,16 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     return YES;
 }
 
-- (BOOL)shouldLoadProgressivelyWithIdentifier:(NSString *)identifier URL:(NSURL *)URL imageType:(NSString *)imageType originalDimensions:(CGSize)originalDimensions
+- (BOOL)_tip_shouldLoadProgressivelyWithIdentifier:(NSString *)identifier URL:(NSURL *)URL imageType:(NSString *)imageType originalDimensions:(CGSize)originalDimensions
 {
-    id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
+    id<TIPImageViewFetchHelperDelegate> delegate = self.atomicDelegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:shouldLoadProgressivelyWithIdentifier:URL:imageType:originalDimensions:)]) {
         return [delegate tip_fetchHelper:self shouldLoadProgressivelyWithIdentifier:identifier URL:URL imageType:imageType originalDimensions:originalDimensions];
     }
     return NO;
 }
 
-- (BOOL)shouldReloadAfterDifferentFetchCompletedWithImage:(UIImage *)image dimensions:(CGSize)dimensions identifier:(NSString *)identifier URL:(NSURL *)URL treatedAsPlaceholder:(BOOL)placeholder manuallyStored:(BOOL)manuallyStored
+- (BOOL)_tip_shouldReloadAfterDifferentFetchCompletedWithImage:(UIImage *)image dimensions:(CGSize)dimensions identifier:(NSString *)identifier URL:(NSURL *)URL treatedAsPlaceholder:(BOOL)placeholder manuallyStored:(BOOL)manuallyStored
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:shouldReloadAfterDifferentFetchCompletedWithImage:dimensions:identifier:URL:treatedAsPlaceholder:manuallyStored:)]) {
@@ -408,7 +467,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     return NO;
 }
 
-- (void)didStartLoading
+- (void)_tip_didStartLoading
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelperDidStartLoading:)]) {
@@ -416,7 +475,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (void)didUpdateProgress:(float)progress
+- (void)_tip_didUpdateProgress:(float)progress
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:didUpdateProgress:)]) {
@@ -424,7 +483,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (void)didUpdateDisplayedImage:(UIImage *)image fromSourceDimensions:(CGSize)size isFinal:(BOOL)isFinal
+- (void)_tip_didUpdateDisplayedImage:(UIImage *)image fromSourceDimensions:(CGSize)size isFinal:(BOOL)isFinal
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:didUpdateDisplayedImage:fromSourceDimensions:isFinal:)]) {
@@ -432,7 +491,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (void)didLoadFinalImageFromSource:(TIPImageLoadSource)source
+- (void)_tip_didLoadFinalImageFromSource:(TIPImageLoadSource)source
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:didLoadFinalImageFromSource:)]) {
@@ -440,7 +499,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (void)didFailToLoadFinalImage:(NSError *)error
+- (void)_tip_didFailToLoadFinalImage:(NSError *)error
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelper:didFailToLoadFinalImage:)]) {
@@ -448,7 +507,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (void)didReset
+- (void)_tip_didReset
 {
     id<TIPImageViewFetchHelperDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(tip_fetchHelperDidReset:)]) {
@@ -464,7 +523,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
         return;
     }
 
-    [self didStartLoading];
+    [self _tip_didStartLoading];
     [self setDebugInfoNeedsUpdate];
 }
 
@@ -473,9 +532,9 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
 
     BOOL continueLoading = (op == _fetchOperation);
     if (continueLoading) {
-        const BOOL shouldUpdate = [self shouldUpdateImageWithPreviewImageResult:previewResult];
+        const BOOL shouldUpdate = [self _tip_shouldUpdateImageWithPreviewImageResult:previewResult];
         if (shouldUpdate) {
-            continueLoading = !![self shouldContinueLoadingAfterFetchingPreviewImageResult:previewResult];
+            continueLoading = !![self _tip_shouldContinueLoadingAfterFetchingPreviewImageResult:previewResult];
 
             [self _tip_updateImage:previewResult.imageContainer.image
                   sourceDimensions:previewResult.imageOriginalDimensions
@@ -485,7 +544,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
                           progress:(continueLoading) ? 0.0f : 1.0f
                              error:nil
                            metrics:(continueLoading) ? nil : op.metrics
-                             final:NO
+                             final:!continueLoading
                             scaled:!continueLoading
                        progressive:NO
                            preview:continueLoading
@@ -503,7 +562,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
         return NO;
     }
 
-    return [self shouldLoadProgressivelyWithIdentifier:identifier URL:URL imageType:imageType originalDimensions:originalDimensions];
+    return [self _tip_shouldLoadProgressivelyWithIdentifier:identifier URL:URL imageType:imageType originalDimensions:originalDimensions];
 }
 
 - (void)tip_imageFetchOperation:(TIPImageFetchOperation *)op didUpdateProgressiveImage:(id<TIPImageFetchResult>)progressiveResult progress:(float)progress
@@ -556,7 +615,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
 
     self.fetchProgress = progress;
     _loadedImageType = op.networkLoadImageType;
-    [self didUpdateProgress:progress];
+    [self _tip_didUpdateProgress:progress];
     [self setDebugInfoNeedsUpdate];
 }
 
@@ -597,7 +656,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
         // already finished as success
     } else {
         self.fetchError = error;
-        [self didFailToLoadFinalImage:error];
+        [self _tip_didFailToLoadFinalImage:error];
     }
     [self setDebugInfoNeedsUpdate];
 }
@@ -629,33 +688,31 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 
     id<TIPImageFetchRequest> fetchRequest = self.fetchRequest;
-    const BOOL targetContentModeSelector = [fetchRequest respondsToSelector:@selector(targetContentMode)];
-    const BOOL targetDimensionsSelector = [fetchRequest respondsToSelector:@selector(targetDimensions)];
-    if (!targetDimensionsSelector && !targetContentModeSelector) {
-        return NO;
-    }
+    const CGSize targetDimensions = [fetchRequest respondsToSelector:@selector(targetDimensions)] ? [fetchRequest targetDimensions] : CGSizeZero;
+    const UIViewContentMode targetContentMode = [fetchRequest respondsToSelector:@selector(targetContentMode)] ? [fetchRequest targetContentMode] : UIViewContentModeCenter;
 
-    UIImageView *fetchImageView = self.fetchImageView;
-    BOOL targetDiffers = NO;
-
-    if (targetDimensionsSelector) {
+    BOOL canRefetch = NO;
+    if (!TIPContentModeDoesScale(targetContentMode) || !TIPSizeGreaterThanZero(targetDimensions)) {
+        canRefetch = YES; // don't know the sizing, can refetch
+    } else {
+        UIImageView *fetchImageView = self.fetchImageView;
         const CGSize viewDimensions = TIPDimensionsFromView(fetchImageView);
-        const CGSize targetDimensions = [fetchRequest targetDimensions];
-        targetDiffers = !CGSizeEqualToSize(viewDimensions, targetDimensions);
+        const UIViewContentMode viewContentMode = fetchImageView.contentMode;
+        if (!CGSizeEqualToSize(viewDimensions, targetDimensions)) {
+            canRefetch = YES; // size differs, can refetch
+        } else if (viewContentMode != targetContentMode) {
+            canRefetch = YES; // content mode differs, can refetch
+        }
     }
 
-    if (!targetDiffers && targetContentModeSelector) {
-        targetDiffers = fetchImageView.contentMode != [fetchRequest targetContentMode];
-    }
-
-    if (targetDiffers) {
+    if (canRefetch) {
         return [dataSource tip_shouldRefetchOnTargetSizingChangeForFetchHelper:self];
     }
 
     return NO;
 }
 
-- (void)_tip_updateImage:(UIImage *)image sourceDimensions:(CGSize)sourceDimensions URL:(NSURL *)URL source:(TIPImageLoadSource)source type:(NSString *)type progress:(float)progress error:(NSError *)error metrics:(TIPImageFetchMetrics *)metrics final:(BOOL)final scaled:(BOOL)scaled progressive:(BOOL)progressive preview:(BOOL)preview placeholder:(BOOL)placeholder
+- (void)_tip_updateImage:(nullable UIImage *)image sourceDimensions:(CGSize)sourceDimensions URL:(nullable NSURL *)URL source:(TIPImageLoadSource)source type:(nullable NSString *)type progress:(float)progress error:(nullable NSError *)error metrics:(nullable TIPImageFetchMetrics *)metrics final:(BOOL)final scaled:(BOOL)scaled progressive:(BOOL)progressive preview:(BOOL)preview placeholder:(BOOL)placeholder
 {
     if (gTwitterImagePipelineAssertEnabled) {
         TIPAssertMessage((0b11111110 & final) == 0b0, @"Cannot set a 1-bit flag with a BOOL that isn't 1 bit");
@@ -676,23 +733,29 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     _loadedImageType = [type copy];
     self.fetchError = error;
     self.fetchMetrics = metrics;
-    if (self.fetchProgress < progress || !self.didLoadAny) {
+    if (metrics && image) {
+        self.fetchResultDimensions = [image tip_dimensions];
+    } else {
+        self.fetchResultDimensions = CGSizeZero;
+    }
+    const float oldProgress = self.fetchProgress;
+    if ((progress > oldProgress) || (progress == oldProgress && oldProgress > 0.f) || !self.didLoadAny) {
         self.fetchProgress = progress;
-        [self didUpdateProgress:progress];
+        [self _tip_didUpdateProgress:progress];
     }
     if (image) {
-        [self didUpdateDisplayedImage:image fromSourceDimensions:sourceDimensions isFinal:final || scaled];
+        [self _tip_didUpdateDisplayedImage:image fromSourceDimensions:sourceDimensions isFinal:final || scaled];
     }
     if (final || scaled) {
-        [self didLoadFinalImageFromSource:source];
+        [self _tip_didLoadFinalImageFromSource:source];
     }
     if (!self.didLoadAny) {
-        [self didReset];
+        [self _tip_didReset];
     }
     [self setDebugInfoNeedsUpdate];
 }
 
-- (void)_tip_resetImage:(UIImage *)image
+- (void)_tip_resetImage:(nullable UIImage *)image
 {
     [self _tip_cancelFetch];
     [self _tip_startObservingImagePipeline:nil];
@@ -717,7 +780,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     _fetchOperation = nil;
 }
 
-- (void)_tip_refetch:(id<TIPImageFetchRequest>)peekedRequest
+- (void)_tip_refetch:(nullable id<TIPImageFetchRequest>)peekedRequest
 {
     if (!_fetchOperation) {
         UIImageView *imageView = self.fetchImageView;
@@ -767,7 +830,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (id<TIPImageFetchRequest>)_tip_extractRequestFromDataSource:(id<TIPImageViewFetchHelperDataSource>)dataSource
+- (nullable id<TIPImageFetchRequest>)_tip_extractRequestFromDataSource:(nullable id<TIPImageViewFetchHelperDataSource>)dataSource
 {
     id<TIPImageFetchRequest> request = nil;
     if (!request && [dataSource respondsToSelector:@selector(tip_imageFetchRequestForFetchHelper:)]) {
@@ -787,7 +850,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     return [[TIPImageViewSimpleFetchRequest alloc] initWithImageURL:imageURL targetView:self.fetchImageView];
 }
 
-- (void)_tip_startObservingImagePipeline:(TIPImagePipeline *)pipeline
+- (void)_tip_startObservingImagePipeline:(nullable TIPImagePipeline *)pipeline
 {
     // Clear related observing
     [[NSNotificationCenter defaultCenter] removeObserver:self name:TIPImagePipelineDidStoreCachedImageNotification object:nil];
@@ -816,7 +879,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
             TIPImageContainer *container = userInfo[TIPImagePipelineImageContainerNotificationKey];
             UIImage *image = container.image;
 
-            if ([self shouldReloadAfterDifferentFetchCompletedWithImage:image dimensions:dimensions identifier:identifier URL:URL treatedAsPlaceholder:placeholder manuallyStored:manuallyStored]) {
+            if ([self _tip_shouldReloadAfterDifferentFetchCompletedWithImage:image dimensions:dimensions identifier:identifier URL:URL treatedAsPlaceholder:placeholder manuallyStored:manuallyStored]) {
                 _flags.isLoadedImageFinal = 0;
                 UIImageView *fetchImageView = self.fetchImageView;
                 if (!TIPIsViewVisible(fetchImageView)) {
@@ -867,7 +930,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     _debugInfoView = nil;
 }
 
-- (NSString *)_tip_debugInfoString:(out NSInteger *)lineCount
+- (NSString *)_tip_debugInfoString:(out NSInteger * __nonnull)lineCount
 {
     NSArray<NSString *> *infos = [self debugInfoStrings];
     NSString *debugInfoString = [infos componentsJoinedByString:@"\n"];
@@ -895,7 +958,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     return sDebugInfoVisible;
 }
 
-- (void)setDebugInfoTextColor:(UIColor *)debugInfoTextColor
+- (void)setDebugInfoTextColor:(nullable UIColor *)debugInfoTextColor
 {
     _debugInfoTextColor = debugInfoTextColor;
     if (_debugInfoView) {
@@ -903,12 +966,12 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (UIColor *)debugInfoTextColor
+- (nullable UIColor *)debugInfoTextColor
 {
     return _debugInfoTextColor;
 }
 
-- (void)setDebugImageHighlightColor:(UIColor *)debugImageHighlightColor
+- (void)setDebugImageHighlightColor:(nullable UIColor *)debugImageHighlightColor
 {
     _debugImageHighlightColor = debugImageHighlightColor;
     if (_debugInfoView) {
@@ -916,7 +979,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
     }
 }
 
-- (UIColor *)debugImageHighlightColor
+- (nullable UIColor *)debugImageHighlightColor
 {
     return _debugImageHighlightColor;
 }
@@ -1023,7 +1086,7 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
 
 @implementation TIPImageViewSimpleFetchRequest
 
-- (instancetype)initWithImageURL:(NSURL *)imageURL targetView:(UIView *)view
+- (instancetype)initWithImageURL:(NSURL *)imageURL targetView:(nullable UIView *)view
 {
     if (self = [super init]) {
         _imageURL = imageURL;
@@ -1036,3 +1099,5 @@ NS_INLINE BOOL TIPIsViewVisible(UIView *view)
 }
 
 @end
+
+NS_ASSUME_NONNULL_END

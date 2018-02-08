@@ -6,11 +6,10 @@
 //  Copyright (c) 2015 Twitter. All rights reserved.
 //
 
+#import <TwitterImagePipeline/TIPDefinitions.h>
+#import <TwitterImagePipeline/TIPImageUtils.h>
 #import <UIKit/UIImage.h>
 #import <UIKit/UIView.h>
-
-#import "TIPDefinitions.h"
-#import "TIPImageUtils.h"
 
 @class TIPImageFetchOperation;
 @class TIPImageContainer;
@@ -89,7 +88,6 @@ typedef void(^TIPImageFetchDidLoadPreviewCallback)(TIPImageFetchPreviewLoadedBeh
  Default is `NO`.
 
  @note This method is called synchronously from a background thread.
- It is the only delegate method not executed on the main thread.
  */
 - (BOOL)tip_imageFetchOperation:(nonnull TIPImageFetchOperation *)op shouldLoadProgressivelyWithIdentifier:(nonnull NSString *)identifier URL:(nonnull NSURL *)URL imageType:(nonnull NSString *)imageType originalDimensions:(CGSize)originalDimensions;
 

@@ -12,6 +12,8 @@
 @class TIPImageFetchDownloadInternalURLSessionDelegate;
 @class NSURLSessionTaskMetrics;
 
+NS_ASSUME_NONNULL_BEGIN
+
 NSString * const TIPImageFetchDownloadConstructorExceptionName = @"TIPImageFetchDownloadConstructorException";
 
 static NSURLSession *sTIPImageFetchDownloadInternalURLSession = nil;
@@ -27,8 +29,8 @@ static float ConvertNSOperationQueuePriorityToNSURLSessionTaskPriority(NSOperati
 
 @interface TIPImageFetchDownloadInternal ()
 
-@property (nonatomic, readonly) NSURLSessionDataTask *task;
-@property (nonatomic) id downloadMetrics;
+@property (nonatomic, nullable, readonly) NSURLSessionDataTask *task;
+@property (nonatomic, nullable) id downloadMetrics;
 @property (nonatomic, readonly) dispatch_queue_t contextQueue;
 
 - (void)prepare;
@@ -47,8 +49,9 @@ static float ConvertNSOperationQueuePriorityToNSURLSessionTaskPriority(NSOperati
 @implementation TIPImageFetchDownloadInternal
 {
     NSOperationQueuePriority _priority;
-    BOOL _started;
     NSURLSession *_session;
+    BOOL _started;
+    BOOL _cancelled;
 }
 
 @synthesize context = _context;
@@ -77,7 +80,7 @@ static float ConvertNSOperationQueuePriorityToNSURLSessionTaskPriority(NSOperati
 
 - (void)start
 {
-    if (_started) {
+    if (_started || _cancelled) {
         return;
     }
 
@@ -100,7 +103,18 @@ static float ConvertNSOperationQueuePriorityToNSURLSessionTaskPriority(NSOperati
 
 - (void)cancelWithDescription:(NSString *)cancelDescription
 {
-    [_task cancel];
+    if (_cancelled) {
+        return;
+    }
+
+    _cancelled = YES;
+    if (_task) {
+        [_task cancel];
+    } else if (_context) {
+        dispatch_async(self.contextQueue, ^{
+            [self.context.client imageFetchDownload:self didCompleteWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]];
+        });
+    }
 }
 
 #pragma mark Properties
@@ -233,7 +247,7 @@ static float ConvertNSOperationQueuePriorityToNSURLSessionTaskPriority(NSOperati
 
 @implementation NSHTTPURLResponse (TIPStubbingSupport)
 
-+ (instancetype)tip_responseWithRequestURL:(NSURL *)requestURL dataLength:(NSUInteger)dataLength responseMIMEType:(NSString *)MIMEType
++ (instancetype)tip_responseWithRequestURL:(NSURL *)requestURL dataLength:(NSUInteger)dataLength responseMIMEType:(nullable NSString *)MIMEType
 {
     NSInteger statusCode = 404;
     NSMutableDictionary *headerFields = [[NSMutableDictionary alloc] init];
@@ -266,3 +280,5 @@ static float ConvertNSOperationQueuePriorityToNSURLSessionTaskPriority(NSOperati
 
     return taskPri;
 }
+
+NS_ASSUME_NONNULL_END

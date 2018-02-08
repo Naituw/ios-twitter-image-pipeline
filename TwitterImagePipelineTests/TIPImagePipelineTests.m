@@ -46,7 +46,6 @@ typedef struct _TIPImageFetchTestStruct {
     BOOL isProgressive;
     BOOL isAnimated;
     uint64_t bps;
-    NSTimeInterval maxDetachedInterval;
 } TIPImageFetchTestStruct;
 
 @interface TestImageStoreRequest : NSObject <TIPImageStoreRequest>
@@ -65,6 +64,7 @@ typedef struct _TIPImageFetchTestStruct {
 @property (nonatomic) UIViewContentMode targetContentMode;
 @property (nonatomic) NSTimeInterval timeToLive;
 @property (nonatomic) TIPImageFetchOptions options;
+@property (nonatomic) TIPImageFetchLoadingSources loadingSources;
 @property (nonatomic) id<TIPImageFetchProgressiveLoadingPolicy> jp2ProgressiveLoadingPolicy;
 @property (nonatomic) id<TIPImageFetchProgressiveLoadingPolicy> jpegProgressiveLoadingPolicy;
 
@@ -157,7 +157,6 @@ static TIPImagePipeline *sPipeline = nil;
     sPipeline = [[TIPImagePipeline alloc] initWithIdentifier:NSStringFromClass(self)];
     globalConfig.imageFetchDownloadProvider = [[TIPTestsImageFetchDownloadProviderOverrideClass() alloc] init];
     globalConfig.maxConcurrentImagePipelineDownloadCount = 4;
-    globalConfig.maxEstimatedTimeRemainingForDetachedHTTPDownloads = -1;
     globalConfig.maxBytesForAllRenderedCaches = 12 * 1024 * 1024;
     globalConfig.maxBytesForAllMemoryCaches = 36 * 1024 * 1024;
     globalConfig.maxBytesForAllDiskCaches = 16 * 1024 * 1024;
@@ -173,24 +172,13 @@ static TIPImagePipeline *sPipeline = nil;
     [sPipeline.memoryCache clearAllImages:NULL];
     [sPipeline.diskCache clearAllImages:NULL];
     globalConfig.imageFetchDownloadProvider = nil;
-    globalConfig.maxEstimatedTimeRemainingForDetachedHTTPDownloads = TIPMaxEstimatedTimeRemainingForDetachedHTTPDownloadsDefault;
     globalConfig.maxBytesForAllRenderedCaches = -1;
     globalConfig.maxBytesForAllMemoryCaches = -1;
     globalConfig.maxBytesForAllDiskCaches = -1;
     globalConfig.maxConcurrentImagePipelineDownloadCount = TIPMaxConcurrentImagePipelineDownloadCountDefault;
     globalConfig.maxRatioSizeOfCacheEntry = -1;
 
-    // flush
-    if (sPipeline) {
-        __block BOOL didInspect = NO;
-        [sPipeline inspect:^(TIPImagePipelineInspectionResult *result) {
-            didInspect = YES;
-        }];
-        while (!didInspect) {
-            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-        }
-        sPipeline = nil;
-    }
+    sPipeline = nil;
 }
 
 - (void)tearDown
@@ -201,6 +189,15 @@ static TIPImagePipeline *sPipeline = nil;
 
     id<TIPImageFetchDownloadProviderWithStubbingSupport> provider = (id<TIPImageFetchDownloadProviderWithStubbingSupport>)[TIPGlobalConfiguration sharedInstance].imageFetchDownloadProvider;
     [provider removeAllDownloadStubs];
+
+    // Flush ALL pipelines
+    __block BOOL didInspect = NO;
+    [[TIPGlobalConfiguration sharedInstance] inspect:^(NSDictionary *results) {
+        didInspect = YES;
+    }];
+    while (!didInspect) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
 
     [super tearDown];
 }
@@ -310,8 +307,13 @@ static TIPImagePipeline *sPipeline = nil;
         XCTAssertEqual(context.progressiveProgressCount, (NSUInteger)0, @"imageType == %@", type);
     }
     if (animatedOn && TIPImageLoadSourceNetwork == source && [[TIPImageCodecCatalogue sharedInstance] codecWithImageTypeSupportsAnimation:type] && context.expectedFrameCount > 1) {
-        XCTAssertGreaterThan(context.firstAnimatedFrameProgress, (float)0.0f);
-        XCTAssertLessThan(context.firstAnimatedFrameProgress, (float)1.0f);
+        // only iOS 11 supports progressive animation loading due to a crashing bug in iOS 10
+        if (@available(iOS 11.0, *)) {
+            XCTAssertGreaterThan(context.firstAnimatedFrameProgress, (float)0.0f);
+            XCTAssertLessThan(context.firstAnimatedFrameProgress, (float)1.0f);
+        } else {
+            XCTAssertEqualWithAccuracy(context.firstAnimatedFrameProgress, (float)0.0f, (float)0.001f);
+        }
     }
     if (animatedOn) {
         if (context.finalImageContainer) {
@@ -455,70 +457,46 @@ static TIPImagePipeline *sPipeline = nil;
         [op waitUntilFinishedWithoutBlockingRunLoop];
         [self _validateFetchOperation:op context:context source:TIPImageLoadSourceNetwork state:TIPImageFetchOperationStateSucceeded];
         XCTAssertLessThan(context.firstProgress, progress);
-
-        // Network Load Cancelled - but detached finish
-        [TIPGlobalConfiguration sharedInstance].maxEstimatedTimeRemainingForDetachedHTTPDownloads = imageStruct.maxDetachedInterval;
-        [sPipeline.memoryCache clearAllImages:NULL];
-        [sPipeline.diskCache clearAllImages:NULL];
-        [sPipeline.renderedCache clearAllImages:NULL];
-        context = [[TIPImagePipelineTestContext alloc] init];
-        context.shouldSupportProgressiveLoading = progressive;
-        context.shouldSupportAnimatedLoading = animated;
-        context.cancelPoint = 0.2f;
-        op = [sPipeline undeprecatedFetchImageWithRequest:request context:context delegate:self];
-        [op waitUntilFinishedWithoutBlockingRunLoop];
-        [self _validateFetchOperation:op context:context source:TIPImageLoadSourceNetwork state:TIPImageFetchOperationStateCancelled];
-        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:imageStruct.maxDetachedInterval + 0.1]]; // allow detached download to finish
-
-        // Disk Load
-        progress = op.progress;
-        context = [[TIPImagePipelineTestContext alloc] init];
-        context.shouldSupportProgressiveLoading = progressive;
-        context.shouldSupportAnimatedLoading = animated;
-        op = [sPipeline undeprecatedFetchImageWithRequest:request context:context delegate:self];
-        [op waitUntilFinishedWithoutBlockingRunLoop];
-        [self _validateFetchOperation:op context:context source:TIPImageLoadSourceDiskCache state:TIPImageFetchOperationStateSucceeded];
-        XCTAssertLessThan(context.firstProgress, progress);
-        [TIPGlobalConfiguration sharedInstance].maxEstimatedTimeRemainingForDetachedHTTPDownloads = -1;
-
-        id<TIPImageFetchDownloadProviderWithStubbingSupport> provider = (id<TIPImageFetchDownloadProviderWithStubbingSupport>)[TIPGlobalConfiguration sharedInstance].imageFetchDownloadProvider;
-        [provider removeDownloadStubForRequestURL:request.imageURL];
     }
 }
 
 - (void)testFetchingPNG
 {
-    TIPImageFetchTestStruct imageStruct = { TIPImageTypePNG, NO, NO, NO, 3 * 1024 * 1024 * 8, 3.0 };
+    TIPImageFetchTestStruct imageStruct = { TIPImageTypePNG, NO, NO, NO, 3 * 1024 * 1024 * 8 };
     [self _runFetching:imageStruct];
 }
 
 - (void)testFetchingJPEG
 {
-    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG, NO, NO, NO, 2 * 1024 * 1024 * 8, 3.0 };
+    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG, NO, NO, NO, 2 * 1024 * 1024 * 8 };
     [self _runFetching:imageStruct];
 }
 
 - (void)testFetchingPJPEG_notProgressive
 {
-    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG, YES, NO, NO, 1 * 1024 * 1024 * 8, 3.0 };
+    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG, YES, NO, NO, 1 * 1024 * 1024 * 8 };
     [self _runFetching:imageStruct];
 }
 
 - (void)testFetchingPJPEG_isProgressive
 {
-    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG, YES, YES, NO, 1 * 1024 * 1024 * 8, 3.0 };
+    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG, YES, YES, NO, 1 * 1024 * 1024 * 8 };
     [self _runFetching:imageStruct];
 }
 
 - (void)testFetchingJPEG2000
 {
-    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG2000, YES, NO, NO, 256 * 1024 * 8, 4.0 };
-    [self _runFetching:imageStruct];
+    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG2000, YES, NO, NO, 256 * 1024 * 8 };
+    if (@available(iOS 11.1, *)) {
+        NSLog(@"iOS 11.1 regressed JPEG2000 so that the image cannot be parsed until fully downloading thus breaking most expectations TIP unit tests have.  Radars have been filed but please file another radar against Apple if you care about JPEG2000 support.");
+    } else {
+        [self _runFetching:imageStruct];
+    }
 }
 
 - (void)testFetchingPJPEG2000
 {
-    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG2000, YES, YES, NO, 256 * 1024 * 8, 4.0 };
+    TIPImageFetchTestStruct imageStruct = { TIPImageTypeJPEG2000, YES, YES, NO, 256 * 1024 * 8 };
     if ([[TIPImageCodecCatalogue sharedInstance] codecWithImageTypeSupportsProgressiveLoading:imageStruct.type]) {
         [self _runFetching:imageStruct];
     } else {
@@ -528,7 +506,7 @@ static TIPImagePipeline *sPipeline = nil;
 
 - (void)testFetchingGIF
 {
-    TIPImageFetchTestStruct imageStruct = { TIPImageTypeGIF, NO, NO, YES, 160 * 1024 * 8, 5.0 };
+    TIPImageFetchTestStruct imageStruct = { TIPImageTypeGIF, NO, NO, YES, 160 * 1024 * 8 };
     [self _runFetching:imageStruct];
 }
 
@@ -561,8 +539,6 @@ static TIPImagePipeline *sPipeline = nil;
         op = [sPipeline undeprecatedFetchImageWithRequest:request context:context delegate:self];
         [op waitUntilFinishedWithoutBlockingRunLoop];
         [self _validateFetchOperation:op context:context source:TIPImageLoadSourceNetwork state:TIPImageFetchOperationStateSucceeded];
-
-        [TIPGlobalConfiguration sharedInstance].maxEstimatedTimeRemainingForDetachedHTTPDownloads = -1;
     }
 }
 
@@ -606,10 +582,10 @@ static TIPImagePipeline *sPipeline = nil;
         XCTAssertEqual(sPipeline.memoryCache.manifest.numberOfEntries, (NSUInteger)0);
         XCTAssertEqual(sPipeline.diskCache.manifest.numberOfEntries, (NSUInteger)0);
 
-        dispatch_sync(config.queueForDiskCaches, ^{
+        dispatch_sync([TIPGlobalConfiguration sharedInstance].queueForDiskCaches, ^{
             preDeallocDiskSize = config.internalTotalBytesForAllDiskCaches;
         });
-        dispatch_sync(config.queueForMemoryCaches, ^{
+        dispatch_sync([TIPGlobalConfiguration sharedInstance].queueForMemoryCaches, ^{
             preDeallocMemSize = config.internalTotalBytesForAllMemoryCaches;
         });
         preDeallocRendSize = config.internalTotalBytesForAllRenderedCaches;
@@ -642,10 +618,10 @@ static TIPImagePipeline *sPipeline = nil;
     for (cacheSizeCheck = 1; cacheSizeCheck <= cacheSizeCheckMax; cacheSizeCheck++) {
         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
 
-        dispatch_sync(config.queueForDiskCaches, ^{
+        dispatch_sync([TIPGlobalConfiguration sharedInstance].queueForDiskCaches, ^{
             postDeallocDiskSize = config.internalTotalBytesForAllDiskCaches;
         });
-        dispatch_sync(config.queueForMemoryCaches, ^{
+        dispatch_sync([TIPGlobalConfiguration sharedInstance].queueForMemoryCaches, ^{
             postDeallocMemSize = config.internalTotalBytesForAllMemoryCaches;
         });
         postDeallocRendSize = config.internalTotalBytesForAllRenderedCaches;
@@ -917,7 +893,7 @@ static TIPImagePipeline *sPipeline = nil;
     [sPipeline clearDiskCache];
     [sPipeline clearMemoryCaches];
 
-    NSString * copyFinishedNotificationName = @"copy_finished";
+    NSString *copyFinishedNotificationName = @"copy_finished";
 
     TIPImagePipelineTestFetchRequest *request = [[TIPImagePipelineTestFetchRequest alloc] init];
     request.imageURL = [TIPImagePipelineTests dummyURLWithPath:[NSUUID UUID].UUIDString];
@@ -1007,7 +983,7 @@ static TIPImagePipeline *sPipeline = nil;
 
     expectation = [self expectationWithDescription:@"Storing Image"];
     TIPImagePipeline *pipeline = [[TIPImagePipeline alloc] initWithIdentifier:signalIdentifier];
-    [pipeline storeImageWithRequest:storeRequest completion:^(BOOL succeeded, NSError *error) {
+    [pipeline storeImageWithRequest:storeRequest completion:^(NSObject<TIPDependencyOperation> *storeOp, BOOL succeeded, NSError *error) {
         didStore = succeeded;
         [expectation fulfill];
     }];
@@ -1065,7 +1041,7 @@ static TIPImagePipeline *sPipeline = nil;
     [self waitForExpectationsWithTimeout:10.0 handler:NULL];
 
     expectation = [self expectationWithDescription:@"Cross Pipeline Store Image"];
-    [pipeline1 storeImageWithRequest:storeRequest completion:^(BOOL succeeded, NSError *error) {
+    [pipeline1 storeImageWithRequest:storeRequest completion:^(NSObject<TIPDependencyOperation> *storeOp, BOOL succeeded, NSError *error) {
         [expectation fulfill];
     }];
     [self waitForExpectationsWithTimeout:10.0 handler:NULL];
@@ -1083,6 +1059,94 @@ static TIPImagePipeline *sPipeline = nil;
     [pipeline2 clearDiskCache];
     pipeline1 = nil;
     pipeline2 = nil;
+}
+
+- (void)testRenamedEntry
+{
+    NSString *pipelineIdentifier = @"dummy.pipeline";
+    TIPImagePipeline *pipeline = [[TIPImagePipeline alloc] initWithIdentifier:pipelineIdentifier];
+    [pipeline clearDiskCache];
+
+    __block TIPImageLoadSource loadSource;
+    __block NSError *loadError;
+    XCTestExpectation *expectation;
+    TIPImageFetchOperation *op;
+    NSURL *URL1 = [NSURL URLWithString:@"http://dummy.pipeline.com/image.jpg"];
+    NSURL *URL2 = [NSURL URLWithString:@"fake://fake.pipeline.com/fake.jpg"];
+
+    TIPImagePipelineTestFetchRequest *fetchRequest1 = [[TIPImagePipelineTestFetchRequest alloc] init];
+    fetchRequest1.imageURL = URL1;
+    fetchRequest1.imageType = TIPImageTypeJPEG;
+    fetchRequest1.progressiveSource = NO;
+
+    TIPImagePipelineTestFetchRequest *fetchRequest2 = [[TIPImagePipelineTestFetchRequest alloc] init];
+    fetchRequest2.imageURL = URL1;
+    fetchRequest2.imageIdentifier = [URL2 absoluteString];
+    fetchRequest2.imageType = TIPImageTypeJPEG;
+    fetchRequest2.progressiveSource = NO;
+    fetchRequest2.loadingSources = TIPImageFetchLoadingSourcesAll & ~(TIPImageFetchLoadingSourceNetwork | TIPImageFetchLoadingSourceNetworkResumed); // no network!
+
+    [self _stubRequest:fetchRequest1 bitrate:0 resumable:YES];
+    [self _stubRequest:fetchRequest2 bitrate:0 resumable:NO]; // just to ensure we don't hit the network
+
+    expectation = [self expectationWithDescription:@"Pipeline Fetch Image 1"];
+    op = [pipeline operationWithRequest:fetchRequest1 context:nil completion:^(id<TIPImageFetchResult> result, NSError *error) {
+        loadSource = result.imageSource;
+        loadError = error;
+        [expectation fulfill];
+    }];
+    [pipeline fetchImageWithOperation:op];
+    [self waitForExpectationsWithTimeout:10.0 handler:NULL];
+    XCTAssertEqual(TIPImageLoadSourceNetwork, loadSource);
+    XCTAssertNil(loadError);
+
+    expectation = [self expectationWithDescription:@"Pipeline Fetch Image 2"];
+    op = [pipeline operationWithRequest:fetchRequest2 context:nil completion:^(id<TIPImageFetchResult> result, NSError *error) {
+        loadSource = result.imageSource;
+        loadError = error;
+        [expectation fulfill];
+    }];
+    [pipeline fetchImageWithOperation:op];
+    [self waitForExpectationsWithTimeout:10.0 handler:NULL];
+    XCTAssertEqual(TIPImageLoadSourceUnknown, loadSource);
+    XCTAssertNotNil(loadError);
+
+    expectation = [self expectationWithDescription:@"Move Image"];
+    [pipeline changeIdentifierForImageWithIdentifier:[URL1 absoluteString] toIdentifier:[URL2 absoluteString] completion:^(NSObject<TIPDependencyOperation> *moveOp, BOOL succeeded, NSError *error) {
+        [expectation fulfill];
+    }];
+    [self waitForExpectationsWithTimeout:10.0 handler:NULL];
+
+    expectation = [self expectationWithDescription:@"Pipeline Fetch Image 2"];
+    op = [pipeline operationWithRequest:fetchRequest2 context:nil completion:^(id<TIPImageFetchResult> result, NSError *error) {
+        loadSource = result.imageSource;
+        loadError = error;
+        [expectation fulfill];
+    }];
+    [pipeline fetchImageWithOperation:op];
+    [self waitForExpectationsWithTimeout:10.0 handler:NULL];
+    XCTAssertEqual(TIPImageLoadSourceDiskCache, loadSource);
+    XCTAssertNil(loadError);
+
+    expectation = [self expectationWithDescription:@"Pipeline Fetch Image 1"];
+    op = [pipeline operationWithRequest:fetchRequest1 context:nil completion:^(id<TIPImageFetchResult> result, NSError *error) {
+        loadSource = result.imageSource;
+        loadError = error;
+        [expectation fulfill];
+    }];
+    [pipeline fetchImageWithOperation:op];
+    [self waitForExpectationsWithTimeout:10.0 handler:NULL];
+    XCTAssertEqual(TIPImageLoadSourceNetwork, loadSource); // Not cache!
+    XCTAssertNil(loadError);
+
+    [pipeline clearDiskCache];
+    [pipeline clearMemoryCaches];
+    expectation = [self expectationWithDescription:@"Clear Caches"];
+    [pipeline inspect:^(TIPImagePipelineInspectionResult *result) {
+        [expectation fulfill];
+    }];
+    [self waitForExpectationsWithTimeout:10.0 handler:NULL];
+    pipeline = nil;
 }
 
 - (void)testInvalidPseudoFilePathFetch
@@ -1198,6 +1262,7 @@ static TIPImagePipeline *sPipeline = nil;
         _options = TIPImageFetchNoOptions;
         _targetContentMode = UIViewContentModeCenter;
         _targetDimensions = CGSizeZero;
+        _loadingSources = TIPImageFetchLoadingSourcesAll;
     }
     return self;
 }

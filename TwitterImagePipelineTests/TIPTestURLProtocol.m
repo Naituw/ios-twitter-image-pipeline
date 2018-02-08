@@ -69,6 +69,15 @@ typedef void(^TIPTestURLProtocolClientBlock)(id<NSURLProtocolClient> __nonnull c
     });
 }
 
++ (BOOL)isEndpointRegistered:(NSURL *)endpoint
+{
+    __block BOOL isRegistered = NO;
+    dispatch_sync(sOriginQueue, ^{
+        isRegistered = (sOriginToResponseDictionary[_UnderlyingURLString(endpoint)] != nil);
+    });
+    return isRegistered;
+}
+
 + (void)initialize
 {
     static dispatch_once_t onceToken;
@@ -313,10 +322,10 @@ static NSRange _RangeForRequest(NSURLRequest *request, NSUInteger dataLength, NS
     NSString *ifRange = [request.allHTTPHeaderFields tip_objectsForCaseInsensitiveKey:@"If-Range"].firstObject;
     if ((!ifRange || !stringForIfRange || [ifRange isEqualToString:stringForIfRange]) && [range hasPrefix:@"bytes="]) {
         range = [range substringFromIndex:[@"bytes=" length]];
-        NSArray *ranges = [range componentsSeparatedByString:@","];
+        NSArray<NSString *> *ranges = [range componentsSeparatedByString:@","];
         if (ranges.count == 1) {
             range = ranges.firstObject;
-            NSArray *indexes = [range componentsSeparatedByString:@"-"];
+            NSArray<NSString *> *indexes = [range componentsSeparatedByString:@"-"];
             if (indexes.count == 2) {
                 const NSInteger startIndex = [indexes[0] integerValue];
                 NSInteger endIndex = (NSInteger)dataLength - 1;

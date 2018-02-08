@@ -10,8 +10,10 @@
 
 #import "TIPTiming.h"
 
-static mach_timebase_info_data_t _TIPMachTimebaseInfo();
-static mach_timebase_info_data_t _TIPMachTimebaseInfo()
+NS_ASSUME_NONNULL_BEGIN
+
+static mach_timebase_info_data_t _TIPMachTimebaseInfo(void);
+static mach_timebase_info_data_t _TIPMachTimebaseInfo(void)
 {
     static mach_timebase_info_data_t sMachInfo;
     static dispatch_once_t sMachInfoOnceToken = 0;
@@ -93,3 +95,5 @@ NSTimeInterval TIPComputeDuration(uint64_t startTime, uint64_t endTime)
     }
     return TIPAbsoluteToTimeInterval(endTime - startTime);
 }
+
+NS_ASSUME_NONNULL_END

@@ -6,6 +6,7 @@
 //  Copyright © 2016 Twitter. All rights reserved.
 //
 
+#import <Accelerate/Accelerate.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <UIKit/UIKit.h>
 
@@ -16,6 +17,7 @@
 #import "UIImage+TIPAdditions.h"
 
 NS_ASSUME_NONNULL_BEGIN
+
 static NSDictionary *TIPImageWritingProperties(UIImage *image,
                                                NSString *type,
                                                TIPImageEncodingOptions options,
@@ -24,7 +26,6 @@ static NSDictionary *TIPImageWritingProperties(UIImage *image,
                                                NSNumber * __nullable animationDuration,
                                                BOOL isGlobalProperties);
 static CGImageRef __nullable TIPCGImageCreateGrayscale(CGImageRef __nullable imageRef);
-NS_ASSUME_NONNULL_END
 
 @implementation UIImage (TIPAdditions)
 
@@ -32,7 +33,7 @@ NS_ASSUME_NONNULL_END
 
 - (CGSize)tip_dimensions
 {
-    return TIPDimensionsFromSizeScaled(self.size, self.scale);
+    return TIPDimensionsFromImage(self);
 }
 
 - (NSUInteger)tip_estimatedSizeInBytes
@@ -46,13 +47,13 @@ NS_ASSUME_NONNULL_END
         return TIPEstimateMemorySizeOfImageWithSettings(self.size, self.scale, 4 /* Guess RGB+A == 4 bytes */, self.images.count);
     }
 
-    const NSUInteger rowCount = (NSUInteger)(self.size.height * self.scale);
+    const NSUInteger rowCount = (NSUInteger)(self.size.height * self.scale) * MAX((NSUInteger)1, self.images.count);
     return bytesPerRow * rowCount;
 }
 
-- (NSUInteger)tip_imageCountBasedOnImageType:(NSString *)type
+- (NSUInteger)tip_imageCountBasedOnImageType:(nullable NSString *)type
 {
-    if (!type || [type isEqualToString:TIPImageTypeGIF] /* only GIF for now */) {
+    if (!type || [type isEqualToString:TIPImageTypeGIF] || [type isEqualToString:TIPImageTypePNG]) {
         return MAX((NSUInteger)1, self.images.count);
     }
 
@@ -119,37 +120,142 @@ NS_ASSUME_NONNULL_END
 
 #pragma mark Transform Methods
 
+- (nullable UIImage *)_tip_CoreGraphics_scaleImageToSpecificDimensions:(CGSize)scaledDimensions scale:(CGFloat)scale
+{
+    CGImageRef cgImage = self.CGImage;
+    if (!cgImage) {
+        return nil;
+    }
+
+    const UIImageOrientation orientation = self.imageOrientation;
+    switch (orientation) {
+        case UIImageOrientationLeft:
+        case UIImageOrientationRight:
+        case UIImageOrientationLeftMirrored:
+        case UIImageOrientationRightMirrored:
+            // swap the dimensions
+            scaledDimensions = CGSizeMake(scaledDimensions.height, scaledDimensions.width);
+            break;
+        default:
+            break;
+    }
+
+    const size_t bitsPerComponent = 8;
+    const CGColorSpaceRef colorSpace = CGImageGetColorSpace(cgImage);
+    const uint32_t bitmapInfo = [self tip_hasAlpha:NO] ? kCGImageAlphaPremultipliedLast : kCGImageAlphaNoneSkipLast;
+    __block UIImage *image = nil;
+
+    TIPExecuteCGContextBlock(^{
+        CGContextRef context = CGBitmapContextCreate(NULL /* void * data */,
+                                                     (size_t)scaledDimensions.width,
+                                                     (size_t)scaledDimensions.height,
+                                                     bitsPerComponent,
+                                                     0 /* bytesPerRow (auto) */,
+                                                     colorSpace,
+                                                     bitmapInfo);
+        TIPDeferRelease(context);
+        if (!context) {
+            return;
+        }
+
+        CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+
+        CGRect rect = CGRectZero;
+        rect.size = scaledDimensions;
+        CGContextDrawImage(context, rect, cgImage);
+
+        CGImageRef scaledCGImage = CGBitmapContextCreateImage(context);
+        TIPDeferRelease(scaledCGImage);
+
+        image = [UIImage imageWithCGImage:scaledCGImage scale:((0.0 == scale) ? [UIScreen mainScreen].scale : scale) orientation:orientation];
+    });
+    return image;
+}
+
+- (UIImage *)_tip_UIKit_scaleImageToSpecificDimensions:(CGSize)scaledDimensions scale:(CGFloat)scale
+{
+    if (0.0 == scale) {
+        scale = [UIScreen mainScreen].scale;
+    }
+    __block UIImage *image = self;
+    const CGRect drawRect = CGRectMake(0, 0, scaledDimensions.width / scale, scaledDimensions.height / scale);
+    const BOOL hasAlpha = [image tip_hasAlpha:NO];
+
+#if 0
+    // Using UIGraphicsImageRenderer is 25x slower than using the old
+    // UIGraphicsBeginImageContextWithOptions way... so we'll stick with that and
+    // keep this code disabled
+    if ([UIGraphicsImageRenderer class] != Nil && !image.images.count) {
+        UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+        format.scale = scale;
+        format.opaque = !hasAlpha;
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:drawRect.size format:format];
+        TIPExecuteCGContextBlock(^{
+            UIImage *renderedImage = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+                [image drawInRect:drawRect];
+            }];
+            image = renderedImage;
+        });
+        if (image) {
+            return image;
+        } else {
+            image = self;
+        }
+    }
+#endif
+
+    TIPExecuteCGContextBlock(^{
+        UIGraphicsBeginImageContextWithOptions(drawRect.size, !hasAlpha, scale);
+        if (!image.images.count) {
+            [image drawInRect:drawRect];
+            image = UIGraphicsGetImageFromCurrentImageContext();
+        } else {
+            NSMutableArray *newFrames = [[NSMutableArray alloc] initWithCapacity:image.images.count];
+            for (UIImage *frame in image.images) {
+                @autoreleasepool {
+                    [frame drawInRect:drawRect];
+                    UIImage *newFrame = UIGraphicsGetImageFromCurrentImageContext();
+                    [newFrames addObject:newFrame];
+                    CGContextClearRect(UIGraphicsGetCurrentContext(), drawRect);
+                }
+            }
+            image = [UIImage animatedImageWithImages:newFrames duration:image.duration];
+        }
+        UIGraphicsEndImageContext();
+    });
+
+    return image;
+}
+
 - (UIImage *)tip_scaledImageWithTargetDimensions:(CGSize)targetDimensions contentMode:(UIViewContentMode)targetContentMode;
 {
-    __block UIImage *image = self;
-
-    const CGSize dimensions = [image tip_dimensions];
+    const CGSize dimensions = [self tip_dimensions];
     const CGSize scaledTargetDimensions = TIPSizeGreaterThanZero(targetDimensions) ? TIPDimensionsScaledToTargetSizing(dimensions, targetDimensions, targetContentMode) : CGSizeZero;
+    UIImage *image;
 
     // If we have a target size and the target size is not the same as our source image's size, draw the resized image
     if (TIPSizeGreaterThanZero(scaledTargetDimensions) && !CGSizeEqualToSize(dimensions, scaledTargetDimensions)) {
-        const CGFloat scale = [UIScreen mainScreen].scale;
-        const CGRect drawRect = CGRectMake(0, 0, scaledTargetDimensions.width / scale, scaledTargetDimensions.height / scale);
-        const BOOL hasAlpha = [image tip_hasAlpha:NO];
 
-        TIPExecuteCGContextBlock(^{
-            UIGraphicsBeginImageContextWithOptions(drawRect.size, !hasAlpha, scale);
-            if (!image.images.count) {
-                [image drawInRect:drawRect];
-                image = UIGraphicsGetImageFromCurrentImageContext();
-            } else {
-                NSMutableArray *newFrames = [[NSMutableArray alloc] initWithCapacity:image.images.count];
-                for (UIImage *frame in image.images) {
-                    @autoreleasepool {
-                        [frame drawInRect:drawRect];
-                        UIImage *newFrame = UIGraphicsGetImageFromCurrentImageContext();
-                        [newFrames addObject:newFrame];
-                    }
-                }
-                image = [UIImage animatedImageWithImages:newFrames duration:image.duration];
-            }
-            UIGraphicsEndImageContext();
-        });
+        // OK, so, to provide some context:
+        //
+        // The UIKit and CoreGraphics mechanisms for scaling occasionally yield a `nil` image.
+        // We cannot repro locally, but externally, it is clearly an issue that affects users.
+        // It has noticeably upticked in iOS 11 as well.
+        //
+        // There are numerous radars out there against this, including #33057552 and #22097047.
+        // It has not been fixed in years and we see no reason to expect a fix in the future.
+        //
+        // Rather than incur complexity of implementing our own custom pixel buffer scaling
+        // as a fallback, we'll instead just return `self` unscaled.  This is not ideal,
+        // but returning a `nil` image is crash prone while returning the image unscaled
+        // would merely be prone to a performance hit.
+
+        // scale with UIKit at screen scale
+        image = [self _tip_UIKit_scaleImageToSpecificDimensions:scaledTargetDimensions scale:0.0];
+        // image = [self _tip_CoreGraphics_scaleImageToSpecificDimensions:scaledTargetDimensions scale:0.0];
+
+    } else {
+        image = self;
     }
 
     if (image == self) {
@@ -163,8 +269,10 @@ NS_ASSUME_NONNULL_END
                                    TIPProblemInfoKeyTargetContentMode : @(targetContentMode),
                                    TIPProblemInfoKeyScaledDimensions : [NSValue valueWithCGSize:scaledTargetDimensions],
                                    TIPProblemInfoKeyImageIsAnimated : @(self.images.count > 1),
+                                   @"scale" : @([UIScreen mainScreen].scale),
                                    };
         [[TIPGlobalConfiguration sharedInstance] postProblem:TIPProblemImageFailedToScale userInfo:userInfo];
+        image = self; // yuck!
     }
     TIPAssert(image != nil);
 
@@ -268,7 +376,7 @@ NS_ASSUME_NONNULL_END
     return image;
 }
 
-- (UIImage *)tip_CGImageBackedImageAndReturnError:(out NSError **)error;
+- (nullable UIImage *)tip_CGImageBackedImageAndReturnError:(out NSError * __autoreleasing __nullable * __nullable)error;
 {
     __block NSError *outError = nil;
     tip_defer(^{
@@ -315,7 +423,7 @@ NS_ASSUME_NONNULL_END
     return image;
 }
 
-- (UIImage *)tip_grayscaleImage
+- (nullable UIImage *)tip_grayscaleImage
 {
     CGImageRef originalImageRef = self.CGImage;
     CGImageRef grayscaleImageRef = TIPCGImageCreateGrayscale(originalImageRef);
@@ -328,11 +436,109 @@ NS_ASSUME_NONNULL_END
     return [UIImage imageWithCGImage:grayscaleImageRef];
 }
 
+- (nullable UIImage *)tip_blurredImageWithRadius:(CGFloat)blurRadius
+{
+    UIImage *image = self;
+
+    // Check pre-conditions
+    if (image.size.width < 1 || image.size.height < 1) {
+        return nil;
+    }
+    if (!image.CGImage) {
+        return nil;
+    }
+
+    __block UIImage *outputImage = nil;
+    TIPExecuteCGContextBlock(^{
+        CGRect imageRect = { CGPointZero, image.size };
+        UIImage *effectImage = image;
+
+        const BOOL hasBlur = blurRadius > __FLT_EPSILON__;
+        if (hasBlur) {
+            UIGraphicsBeginImageContextWithOptions(image.size, NO, [[UIScreen mainScreen] scale]);
+            tip_defer(^{
+                UIGraphicsEndImageContext();
+            });
+
+            CGContextRef effectInContext = UIGraphicsGetCurrentContext();
+            CGContextScaleCTM(effectInContext, 1.0, -1.0);
+            CGContextTranslateCTM(effectInContext, 0, -image.size.height);
+            CGContextDrawImage(effectInContext, imageRect, image.CGImage);
+
+            vImage_Buffer effectInBuffer;
+            effectInBuffer.data     = CGBitmapContextGetData(effectInContext);
+            effectInBuffer.width    = CGBitmapContextGetWidth(effectInContext);
+            effectInBuffer.height   = CGBitmapContextGetHeight(effectInContext);
+            effectInBuffer.rowBytes = CGBitmapContextGetBytesPerRow(effectInContext);
+
+            UIGraphicsBeginImageContextWithOptions(image.size, NO, [[UIScreen mainScreen] scale]);
+            tip_defer(^{
+                UIGraphicsEndImageContext();
+            });
+
+            CGContextRef effectOutContext = UIGraphicsGetCurrentContext();
+            vImage_Buffer effectOutBuffer;
+            effectOutBuffer.data     = CGBitmapContextGetData(effectOutContext);
+            effectOutBuffer.width    = CGBitmapContextGetWidth(effectOutContext);
+            effectOutBuffer.height   = CGBitmapContextGetHeight(effectOutContext);
+            effectOutBuffer.rowBytes = CGBitmapContextGetBytesPerRow(effectOutContext);
+
+            // A description of how to compute the box kernel width from the Gaussian
+            // radius (aka standard deviation) appears in the SVG spec:
+            // http://www.w3.org/TR/SVG/filters.html#feGaussianBlurElement
+            //
+            // For larger values of 's' (s >= 2.0), an approximation can be used: Three
+            // successive box-blurs build a piece-wise quadratic convolution kernel, which
+            // approximates the Gaussian kernel to within roughly 3%.
+            //
+            // let d = floor(s * 3*sqrt(2*pi)/4 + 0.5)
+            //
+            // ... if d is odd, use three box-blurs of size 'd', centered on the output pixel.
+            //
+            const CGFloat inputRadius = blurRadius;
+            uint32_t radius = (uint32_t)floor(inputRadius * 3. * sqrt(2 * M_PI) / 4 + 0.5);
+            if (radius % 2 != 1) {
+                radius += 1; // force radius to be odd so that the three box-blur methodology works.
+            }
+            vImageBoxConvolve_ARGB8888(&effectInBuffer, &effectOutBuffer, NULL, 0, 0, radius, radius, 0, kvImageEdgeExtend);
+            vImageBoxConvolve_ARGB8888(&effectOutBuffer, &effectInBuffer, NULL, 0, 0, radius, radius, 0, kvImageEdgeExtend);
+            vImageBoxConvolve_ARGB8888(&effectInBuffer, &effectOutBuffer, NULL, 0, 0, radius, radius, 0, kvImageEdgeExtend);
+
+            effectImage = UIGraphicsGetImageFromCurrentImageContext();
+        }
+
+        // Set up output context.
+        UIGraphicsBeginImageContextWithOptions(image.size, NO, [[UIScreen mainScreen] scale]);
+        tip_defer(^{
+            UIGraphicsEndImageContext();
+        });
+
+        CGContextRef outputContext = UIGraphicsGetCurrentContext();
+        CGContextScaleCTM(outputContext, 1.0, -1.0);
+        CGContextTranslateCTM(outputContext, 0, -image.size.height);
+
+        // Draw base image.
+        CGContextDrawImage(outputContext, imageRect, image.CGImage);
+
+        // Draw effect image.
+        if (hasBlur) {
+            CGContextSaveGState(outputContext);
+            CGContextDrawImage(outputContext, imageRect, effectImage.CGImage);
+            CGContextRestoreGState(outputContext);
+        }
+
+        // Output image is ready.
+        outputImage = UIGraphicsGetImageFromCurrentImageContext();
+    });
+
+    return outputImage;
+}
+
 #pragma mark Decode Methods
 
-+ (UIImage *)tip_imageWithAnimatedImageFile:(NSString *)filePath
-                                  durations:(out NSArray<NSNumber *> **)durationsOut
-                                  loopCount:(out NSUInteger *)loopCountOut
++ (nullable UIImage *)tip_imageWithAnimatedImageFile:(NSString *)filePath
+                                           durations:(out NSArray<NSNumber *> * __autoreleasing __nullable * __nullable)durationsOut
+                                           loopCount:(out NSUInteger * __nullable)loopCountOut
 {
     NSURL *fileURL = [NSURL fileURLWithPath:filePath isDirectory:NO];
     CGImageSourceRef imageSource = CGImageSourceCreateWithURL((CFURLRef)fileURL, NULL);
@@ -345,9 +551,9 @@ NS_ASSUME_NONNULL_END
     return nil;
 }
 
-+ (UIImage *)tip_imageWithAnimatedImageData:(NSData *)data
-                                  durations:(out NSArray<NSNumber *> **)durationsOut
-                                  loopCount:(out NSUInteger *)loopCountOut
++ (nullable UIImage *)tip_imageWithAnimatedImageData:(NSData *)data
+                                           durations:(out NSArray<NSNumber *> * __autoreleasing __nullable * __nullable)durationsOut
+                                           loopCount:(out NSUInteger * __nullable)loopCountOut
 {
     CGImageSourceRef imageSource = CGImageSourceCreateWithData((CFDataRef)data, NULL);
     TIPDeferRelease(imageSource);
@@ -362,12 +568,12 @@ NS_ASSUME_NONNULL_END
 #pragma mark Encode Methods
 
 - (BOOL)tip_writeToCGImageDestinationWithBlock:(CGImageDestinationRef(^)(NSString *UTType, const NSUInteger imageCount))desinationCreationBlock
-                                          type:(NSString *)type
+                                          type:(nullable NSString *)type
                                encodingOptions:(TIPImageEncodingOptions)options
                                        quality:(float)quality
                             animationLoopCount:(NSUInteger)animationLoopCount
-                       animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
-                                         error:(out NSError **)error
+                       animationFrameDurations:(nullable NSArray<NSNumber *> *)animationFrameDurations
+                                         error:(out NSError * __autoreleasing __nullable * __nullable)error
 {
     __block NSError *theError = nil;
     tip_defer(^{
@@ -427,12 +633,12 @@ NS_ASSUME_NONNULL_END
     return YES;
 }
 
-- (NSData *)tip_writeToDataWithType:(NSString *)type
-                    encodingOptions:(TIPImageEncodingOptions)options
-                            quality:(float)quality
-                 animationLoopCount:(NSUInteger)animationLoopCount
-            animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
-                              error:(out NSError **)error
+- (nullable NSData *)tip_writeToDataWithType:(nullable NSString *)type
+                             encodingOptions:(TIPImageEncodingOptions)options
+                                     quality:(float)quality
+                          animationLoopCount:(NSUInteger)animationLoopCount
+                     animationFrameDurations:(nullable NSArray<NSNumber *> *)animationFrameDurations
+                                       error:(out NSError * __autoreleasing __nullable * __nullable)error
 {
     __block NSError *theError = nil;
     tip_defer(^{
@@ -457,13 +663,13 @@ NS_ASSUME_NONNULL_END
 }
 
 - (BOOL)tip_writeToFile:(NSString *)filePath
-                   type:(NSString *)type
+                   type:(nullable NSString *)type
         encodingOptions:(TIPImageEncodingOptions)options
                 quality:(float)quality
      animationLoopCount:(NSUInteger)animationLoopCount
-animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
+animationFrameDurations:(nullable NSArray<NSNumber *> *)animationFrameDurations
              atomically:(BOOL)atomic
-                  error:(out NSError **)error
+                  error:(out NSError * __autoreleasing __nullable * __nullable)error
 {
     TIPAssert(filePath != nil);
 
@@ -535,12 +741,12 @@ animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
 @implementation UIImage (TIPAdditions_CGImage)
 
 - (BOOL)tip_writeToCGImageDestination:(CGImageDestinationRef)destinationRef
-                                 type:(NSString *)type
+                                 type:(nullable NSString *)type
                       encodingOptions:(TIPImageEncodingOptions)options
                               quality:(float)quality
                    animationLoopCount:(NSUInteger)animationLoopCount
-              animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
-                                error:(out NSError **)error
+              animationFrameDurations:(nullable NSArray<NSNumber *> *)animationFrameDurations
+                                error:(out NSError * __autoreleasing __nullable * __nullable)error
 {
     __block NSError *theError = nil;
     tip_defer(^{
@@ -615,9 +821,9 @@ animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
     return !theError;
 }
 
-+ (UIImage *)tip_imageWithAnimatedImageSource:(CGImageSourceRef)source
-                                    durations:(out NSArray<NSNumber *> **)durationsOut
-                                    loopCount:(out NSUInteger *)loopCountOut
++ (nullable UIImage *)tip_imageWithAnimatedImageSource:(CGImageSourceRef)source
+                                             durations:(out NSArray<NSNumber *> * __autoreleasing __nullable * __nullable)durationsOut
+                                             loopCount:(out NSUInteger * __nullable)loopCountOut
 {
     UIImage *image = nil;
     NSTimeInterval duration = 0.0;
@@ -625,9 +831,22 @@ animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
     if (count > 1 && loopCountOut) {
         CFDictionaryRef topLevelProperties = CGImageSourceCopyProperties(source, NULL);
         TIPDeferRelease(topLevelProperties);
-        CFDictionaryRef topLevelGIFProperties = topLevelProperties ? CFDictionaryGetValue(topLevelProperties, kCGImagePropertyGIFDictionary) : NULL;
-        NSNumber *loopCount = topLevelGIFProperties ? (NSNumber *)CFDictionaryGetValue(topLevelGIFProperties, kCGImagePropertyGIFLoopCount) : nil;
-        *loopCountOut = (loopCount) ? loopCount.unsignedIntegerValue : 0;
+
+        if (topLevelProperties) {
+            NSNumber *loopCount = nil;
+            CFDictionaryRef topLevelGIFProperties = CFDictionaryGetValue(topLevelProperties, kCGImagePropertyGIFDictionary);
+            if (topLevelGIFProperties) {
+                loopCount = (NSNumber *)CFDictionaryGetValue(topLevelGIFProperties, kCGImagePropertyGIFLoopCount);
+            } else {
+                CFDictionaryRef topLevelPNGProperties = CFDictionaryGetValue(topLevelProperties, kCGImagePropertyPNGDictionary);
+                if (topLevelPNGProperties) {
+                    loopCount = (NSNumber *)CFDictionaryGetValue(topLevelPNGProperties, kCGImagePropertyAPNGLoopCount);
+                }
+            }
+            *loopCountOut = (loopCount) ? loopCount.unsignedIntegerValue : 0;
+        } else {
+            *loopCountOut = 0;
+        }
     }
 
     const CGFloat scale = [UIScreen mainScreen].scale;
@@ -646,19 +865,38 @@ animationFrameDurations:(NSArray<NSNumber *> *)animationFrameDurations
                 if (frame) {
                     float additionalDuration = 0.0;
 
-                    CFDictionaryRef gifProperties = CFDictionaryGetValue(properties, kCGImagePropertyGIFDictionary);
-                    if (gifProperties) {
-                        NSNumber *unclampedDelayTime = (NSNumber *)CFDictionaryGetValue(gifProperties, kCGImagePropertyGIFUnclampedDelayTime);
+                    CFStringRef unclampedDelayTimeKey = NULL;
+                    CFStringRef delayTimeKey = NULL;
+                    CFDictionaryRef animatedProperties = NULL;
+
+                    animatedProperties = CFDictionaryGetValue(properties, kCGImagePropertyGIFDictionary);
+                    if (animatedProperties) {
+                        // GIF
+                        unclampedDelayTimeKey = kCGImagePropertyGIFUnclampedDelayTime;
+                        delayTimeKey = kCGImagePropertyGIFDelayTime;
+                    } else {
+                        animatedProperties = CFDictionaryGetValue(properties, kCGImagePropertyPNGDictionary);
+                        if (animatedProperties) {
+                            // APNG
+                            unclampedDelayTimeKey = kCGImagePropertyAPNGUnclampedDelayTime;
+                            delayTimeKey = kCGImagePropertyAPNGDelayTime;
+                        }
+                    }
+
+                    if (animatedProperties) {
+
+                        NSNumber *unclampedDelayTime = (NSNumber *)CFDictionaryGetValue(animatedProperties, unclampedDelayTimeKey);
                         if (unclampedDelayTime) {
                             additionalDuration = unclampedDelayTime.floatValue;
                         } else {
-                            NSNumber *delayTime = (NSNumber *)CFDictionaryGetValue(gifProperties, kCGImagePropertyGIFDelayTime);
+                            NSNumber *delayTime = (NSNumber *)CFDictionaryGetValue(animatedProperties, delayTimeKey);
                             if (delayTime) {
                                 additionalDuration = delayTime.floatValue;
                             }
                         }
+
                     } else {
-                        TIPLogWarning(@"No GIF dictionary in properties:%@", (__bridge NSDictionary *)properties);
+                        TIPLogWarning(@"No GIF/PNG dictionary in properties for animated image : %@", (__bridge NSDictionary *)properties);
                     }
 
                     if (additionalDuration < 0.01f + FLT_EPSILON) {
@@ -694,17 +932,18 @@ static NSDictionary *TIPImageWritingProperties(UIImage *image,
                                                NSString *type,
                                                TIPImageEncodingOptions options,
                                                float quality,
-                                               NSNumber *animationLoopCount,
-                                               NSNumber *animationDuration,
+                                               NSNumber * __nullable animationLoopCount,
+                                               NSNumber * __nullable animationDuration,
                                                BOOL isGlobalProperties)
 {
     const BOOL preferProgressive = TIP_BITMASK_HAS_SUBSET_FLAGS(options, TIPImageEncodingProgressive);
+    const BOOL isAnimated = image.images.count > 1;
     NSMutableDictionary *properties = [NSMutableDictionary dictionary];
 
     // TODO: investigate if we should be using kCGImageDestinationOptimizeColorForSharing
     /*
      if (&kCGImageDestinationOptimizeColorForSharing != NULL) {
-     properties[(NSString *)kCGImageDestinationOptimizeColorForSharing] = (__bridge id)kCFBooleanTrue;
+        properties[(NSString *)kCGImageDestinationOptimizeColorForSharing] = (__bridge id)kCFBooleanTrue;
      }
      */
 
@@ -735,16 +974,28 @@ static NSDictionary *TIPImageWritingProperties(UIImage *image,
                                    (NSString *)kCGImagePropertyTIFFCompression : @(/*NSTIFFCompressionLZW*/ 5)
                                    };
         properties[(NSString *)kCGImagePropertyTIFFDictionary] = tiffInfo;
-    } else if ([type isEqualToString:TIPImageTypePNG]) {
+    } else if ([type isEqualToString:TIPImageTypePNG] && !isAnimated) {
         if (preferProgressive) {
             NSDictionary *pngInfo = @{
                                       (NSString *)kCGImagePropertyPNGInterlaceType : @1 // 1 == Adam7 interlaced encoding
                                       };
             properties[(NSString *)kCGImagePropertyPNGDictionary] = pngInfo;
         }
-    } else if ([type isEqualToString:TIPImageTypeGIF]) {
-        if (image.images.count > 1) {
-            NSDictionary *gifInfo = nil;
+    } else if (isAnimated) {
+
+        NSString *animatedDictionaryKey = nil;
+        NSString *animatedValueKey = nil; // loop-count for global, delay-time for image
+
+        if ([type isEqualToString:TIPImageTypeGIF]) {
+            animatedDictionaryKey = (NSString *)kCGImagePropertyGIFDictionary;
+            animatedValueKey = (isGlobalProperties) ? (NSString *)kCGImagePropertyGIFLoopCount : (NSString *)kCGImagePropertyGIFDelayTime;
+        } else if ([type isEqualToString:TIPImageTypePNG]) {
+            animatedDictionaryKey = (NSString *)kCGImagePropertyPNGDictionary;
+            animatedValueKey = (isGlobalProperties) ? (NSString *)kCGImagePropertyAPNGLoopCount : (NSString *)kCGImagePropertyAPNGDelayTime;
+        }
+
+        if (animatedDictionaryKey && animatedValueKey) {
+            NSDictionary *animatedDictionary = nil;
             if (isGlobalProperties) {
 
                 const NSUInteger loopCount = animationLoopCount.unsignedIntegerValue;
@@ -753,20 +1004,22 @@ static NSDictionary *TIPImageWritingProperties(UIImage *image,
                 // Restrict our loop count here to something that is more than long enough.
                 const UInt16 loopCount16 = (UInt16)MIN(loopCount, (NSUInteger)INT16_MAX);
 
-                gifInfo = @{ (NSString *)kCGImagePropertyGIFLoopCount : @(loopCount16) };
+                animatedDictionary = @{ animatedValueKey : @(loopCount16) };
 
             } else {
-                gifInfo = @{ (NSString *)kCGImagePropertyGIFDelayTime : animationDuration ?: @(image.duration / image.images.count) };
+
+                animatedDictionary = @{ animatedValueKey : animationDuration ?: @((float)(image.duration / image.images.count)) };
+
             }
 
-            properties[(NSString *)kCGImagePropertyGIFDictionary] = gifInfo;
+            properties[animatedDictionaryKey] = animatedDictionary;
         }
     }
 
     return properties;
 }
 
-static CGImageRef TIPCGImageCreateGrayscale(CGImageRef imageRef)
+static CGImageRef __nullable TIPCGImageCreateGrayscale(CGImageRef __nullable imageRef)
 {
     if (!imageRef) {
         return NULL;
@@ -803,3 +1056,5 @@ static CGImageRef TIPCGImageCreateGrayscale(CGImageRef imageRef)
     // Create bitmap image info from pixel data in current context
     return CGBitmapContextCreateImage(context);
 }
+
+NS_ASSUME_NONNULL_END

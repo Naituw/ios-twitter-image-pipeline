@@ -21,8 +21,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 static CGSize TIPSizeAlignToPixelEx(CGSize size, CGFloat scale);
 
-NS_ASSUME_NONNULL_END
-
 #pragma mark - Functions
 
 BOOL TIPSizeMatchesTargetSizing(const CGSize size, CGSize targetSize, const UIViewContentMode targetContentMode, const CGFloat scale)
@@ -139,7 +137,8 @@ NSUInteger TIPEstimateMemorySizeOfImageWithSettings(CGSize size, CGFloat scale, 
     return pixels * componentsPerPixel * MAX((NSUInteger)1, frameCount);
 }
 
-NS_INLINE int _TIPImageByteIndexOfAlphaComponent(CGBitmapInfo bitmapInfo, size_t numberOfComponents, BOOL isLeadingByteAlpha)
+static int _TIPImageByteIndexOfAlphaComponent(CGBitmapInfo bitmapInfo, size_t numberOfComponents, BOOL isLeadingByteAlpha);
+static int _TIPImageByteIndexOfAlphaComponent(CGBitmapInfo bitmapInfo, size_t numberOfComponents, BOOL isLeadingByteAlpha)
 {
     int alphaByteIndex = -1;
     const uint32_t byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
@@ -292,7 +291,7 @@ void TIPExecuteCGContextBlock(dispatch_block_t block)
         const BOOL serialize = config.serializeCGContextAccess;
 
         if (serialize) {
-            dispatch_sync(sContextQueue, block);
+            tip_dispatch_sync_autoreleasing(sContextQueue, block);
         } else {
             block();
         }
@@ -308,3 +307,5 @@ static CGSize TIPSizeAlignToPixelEx(CGSize size, CGFloat scale)
 {
     return CGSizeMake(__tg_ceil(size.width * scale) / scale, __tg_ceil(size.height * scale) / scale);
 }
+
+NS_ASSUME_NONNULL_END

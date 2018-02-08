@@ -13,9 +13,11 @@
 
 #import "TIPLogger.h"
 
+NS_ASSUME_NONNULL_BEGIN
+
 #pragma mark - Binary
 
-FOUNDATION_EXTERN BOOL TIPIsExtension();
+FOUNDATION_EXTERN BOOL TIPIsExtension(void);
 
 #pragma mark - Bitmask Helpers
 
@@ -83,9 +85,9 @@ do { \
 
 #if DEBUG
 FOUNDATION_EXTERN void __TIPAssert(BOOL expression);
-FOUNDATION_EXTERN BOOL TIPIsDebuggerAttached();
-FOUNDATION_EXTERN void TIPTriggerDebugSTOP();
-FOUNDATION_EXTERN BOOL TIPIsDebugSTOPOnAssertEnabled();
+FOUNDATION_EXTERN BOOL TIPIsDebuggerAttached(void);
+FOUNDATION_EXTERN void TIPTriggerDebugSTOP(void);
+FOUNDATION_EXTERN BOOL TIPIsDebugSTOPOnAssertEnabled(void);
 FOUNDATION_EXTERN void TIPSetDebugSTOPOnAssertEnabled(BOOL stopOnAssert);
 #else
 #define __TIPAssert(exp) ((void)0)
@@ -95,7 +97,7 @@ FOUNDATION_EXTERN void TIPSetDebugSTOPOnAssertEnabled(BOOL stopOnAssert);
 #define TIPSetDebugSTOPOnAssertEnabled(stopOnAssert) ((void)0)
 #endif
 
-FOUNDATION_EXTERN BOOL TIPAmIBeingUnitTested();
+FOUNDATION_EXTERN BOOL TIPAmIBeingUnitTested(void);
 
 #pragma mark - Style Check support
 
@@ -116,7 +118,7 @@ FOUNDATION_EXTERN BOOL TIPAmIBeingUnitTested();
 
 #pragma mark - tip_defer support
 
-typedef void(^tip_defer_block_t)();
+typedef void(^tip_defer_block_t)(void);
 NS_INLINE void tip_deferFunc(__strong tip_defer_block_t __nonnull * __nonnull blockRef)
 {
     tip_defer_block_t actualBlock = *blockRef;
@@ -134,3 +136,56 @@ __strong tip_defer_block_t tip_macro_concat(tip_stack_defer_block_, __LINE__) __
 #define TIPDeferRelease(ref) tip_defer(^{ if (ref) { CFRelease(ref); } })
 
 #pragma twitter stopignorestylecheck
+
+#pragma mark - GCD helpers
+
+// Autoreleasing dispatch functions.
+// callers cannot use autoreleasing passthrough
+//
+//  Example of what can't be done (autoreleasing passthrough):
+//
+//      - (void)deleteFile:(NSString *)fileToDelete
+//                   error:(NSError * __autoreleasing *)error
+//      {
+//          tip_dispatch_sync_autoreleasing(_config.queueForDiskCaches, ^{
+//              [[NSFileManager defaultFileManager] removeItemAtPath:fileToDelete
+//       /* will lead to crash if set to non-nil value --> */  error:error];
+//          });
+//      }
+//
+//  Example of how to avoid passthrough crash:
+//
+//      - (void)deleteFile:(NSString *)fileToDelete
+//                   error:(NSError * __autoreleasing *)error
+//      {
+//          __block NSError *outerError = nil;
+//          tip_dispatch_sync_autoreleasing(_config.queueForDiskCaches, ^{
+//              NSError *innerError = nil;
+//              [[NSFileManager defaultFileManager] removeItemAtPath:fileToDelete
+//                                                             error:&innerError];
+//              outerError = innerError;
+//          });
+//          if (error) {
+//              *error = outerError;
+//          }
+//      }
+
+NS_INLINE void tip_dispatch_async_autoreleasing(dispatch_queue_t queue, dispatch_block_t block)
+{
+    dispatch_async(queue, ^{
+        @autoreleasepool {
+            block();
+        }
+    });
+}
+
+NS_INLINE void tip_dispatch_sync_autoreleasing(dispatch_queue_t queue, dispatch_block_t block)
+{
+    dispatch_sync(queue, ^{
+        @autoreleasepool {
+            block();
+        }
+    });
+}
+
+NS_ASSUME_NONNULL_END

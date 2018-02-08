@@ -10,6 +10,8 @@
 
 @protocol TIPImageStoreRequestHydrater;
 
+NS_ASSUME_NONNULL_BEGIN
+
 /** store options */
 typedef NS_OPTIONS(NSInteger, TIPImageStoreOptions)
 {
@@ -66,7 +68,7 @@ typedef NS_OPTIONS(NSInteger, TIPImageStoreOptions)
  mechanism for matching image fetches to the internal cache(s).  Not providing an `imageIdentifier`
  (or `nil`) will fall back to using `[imageURL absoluteString]`.
  */
-@property (nonnull, nonatomic, readonly) NSURL *imageURL;
+@property (nonatomic, readonly) NSURL *imageURL;
 
 @optional
 
@@ -152,6 +154,11 @@ typedef NS_OPTIONS(NSInteger, TIPImageStoreOptions)
  */
 @property (nullable, nonatomic, readonly) id<TIPImageStoreRequestHydrater> hydrater;
 
+/**
+ A decoder config map for cases when we need to decode the image for memory cache storage
+ */
+@property (nullable, nonatomic, readonly, copy) NSDictionary<NSString *, id> *decoderConfigMap;
+
 @end
 
 /** `TIPImageStoreRequest` specifically for `UIImage` based store requests */
@@ -213,6 +220,8 @@ typedef void(^TIPImageStoreHydraterCompletionBlock)(id<TIPImageStoreRequest> __n
  @param pipeline The `TIPImagePipeline` executing the storage
  @param completion The completionBlock that must be called whenever hydration has completed.
  */
-- (void)tip_hydrateImageStoreRequest:(nonnull id<TIPImageStoreRequest>)request imagePipeline:(nonnull TIPImagePipeline *)pipeline completion:(nonnull TIPImageStoreHydraterCompletionBlock)completion;
+- (void)tip_hydrateImageStoreRequest:(id<TIPImageStoreRequest>)request imagePipeline:(TIPImagePipeline *)pipeline completion:(TIPImageStoreHydraterCompletionBlock)completion;
 
 @end
+
+NS_ASSUME_NONNULL_END

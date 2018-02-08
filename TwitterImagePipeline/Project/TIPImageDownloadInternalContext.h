@@ -11,6 +11,8 @@
 #import "TIPImageFetchDownload.h"
 #import "TIPImageFetchOperation+Project.h"
 
+NS_ASSUME_NONNULL_BEGIN
+
 @interface TIPImageDownloadInternalContext : NSObject <TIPImageFetchOperationUnderlyingContext, TIPImageFetchDownloadContext>
 
 @property (nonatomic, assign, nullable) id<TIPImageFetchDownload> download;
@@ -22,10 +24,10 @@
 @property (nonatomic, nullable) TIPImageDiskCacheTemporaryFile *temporaryFile;
 @property (nonatomic, nullable) TIPPartialImage *partialImage;
 @property (nonatomic, copy, nullable) NSString *lastModified;
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, id> *decoderConfigMap;
 
 @property (nonatomic, nullable) NSError *progressStateError;
 
-@property (nonatomic) BOOL doesProtocolSupportCancel;
 @property (nonatomic) BOOL didRequestHydration;
 @property (nonatomic) BOOL didStart;
 @property (nonatomic) BOOL didReceiveResponse;
@@ -35,18 +37,15 @@
 @property (nonatomic, nullable) NSHTTPURLResponse *response;
 @property (nonatomic) NSUInteger contentLength;
 @property (nonatomic, readonly) NSUInteger delegateCount;
-@property (nonatomic) NSUInteger totalBytesReceived;
-@property (nonatomic) uint64_t firstBytesReceivedMachTime;
-@property (nonatomic) uint64_t latestBytesReceivedMachTime;
-- (int64_t)latestBytesPerSecond;
-- (BOOL)canContinueAsDetachedDownload;
 
 - (NSOperationQueuePriority)downloadPriority;
 - (nullable id<TIPImageDownloadDelegate>)firstDelegate;
-- (BOOL)containsDelegate:(nonnull id<TIPImageDownloadDelegate>)delegate;
-- (void)addDelegate:(nonnull id<TIPImageDownloadDelegate>)delegate;
-- (void)removeDelegate:(nonnull id<TIPImageDownloadDelegate>)delegate;
-- (void)executePerDelegateSuspendingQueue:(nullable dispatch_queue_t)queue block:(nonnull void(^)(id<TIPImageDownloadDelegate> __nonnull))block;
-+ (void)executeDelegate:(nonnull id<TIPImageDownloadDelegate>)delegate suspendingQueue:(nullable dispatch_queue_t)queue block:(nonnull void (^)(id<TIPImageDownloadDelegate> __nonnull))block;
+- (BOOL)containsDelegate:(id<TIPImageDownloadDelegate>)delegate;
+- (void)addDelegate:(id<TIPImageDownloadDelegate>)delegate;
+- (void)removeDelegate:(id<TIPImageDownloadDelegate>)delegate;
+- (void)executePerDelegateSuspendingQueue:(nullable dispatch_queue_t)queue block:(void(^)(id<TIPImageDownloadDelegate>))block;
++ (void)executeDelegate:(id<TIPImageDownloadDelegate>)delegate suspendingQueue:(nullable dispatch_queue_t)queue block:(void (^)(id<TIPImageDownloadDelegate>))block;
 
 @end
+
+NS_ASSUME_NONNULL_END

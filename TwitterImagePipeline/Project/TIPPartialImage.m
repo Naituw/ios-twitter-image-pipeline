@@ -10,6 +10,8 @@
 #import "TIPImageCodecCatalogue.h"
 #import "TIPPartialImage.h"
 
+NS_ASSUME_NONNULL_BEGIN
+
 @interface TIPPartialImageCodecDetector : NSObject
 @property (nullable, nonatomic, readonly) NSMutableData *codecDetectionBuffer;
 @property (nullable, nonatomic, readonly) id<TIPImageCodec> detectedCodec;
@@ -21,7 +23,7 @@
 static const float kUnfinishedImageProgressCap = 0.999f;
 
 @interface TIPPartialImage ()
-@property (nonatomic, readwrite) TIPPartialImageState state;
+@property (atomic, readwrite) TIPPartialImageState state;
 @end
 
 @implementation TIPPartialImage
@@ -30,10 +32,11 @@ static const float kUnfinishedImageProgressCap = 0.999f;
     id<TIPImageCodec> _codec;
     id<TIPImageDecoder> _decoder;
     id<TIPImageDecoderContext> _decoderContext;
+    NSDictionary<NSString *, id> *_decoderConfigMap;
     dispatch_queue_t _renderQueue;
 }
 
-// the following getters may appear superfluous, and would be if it weren't for the need to
+// the following getters may appear superfluous, and would be, if it weren't for the need to
 // annotate them with __attribute__((no_sanitize("thread")).  the getters make the @synthesize
 // lines necessary.
 //
@@ -79,7 +82,7 @@ static const float kUnfinishedImageProgressCap = 0.999f;
     return _progressive;
 }
 
-- (NSData *)data
+- (nullable NSData *)data
 {
     __block NSData *data = nil;
     dispatch_sync(_renderQueue, ^{
@@ -113,12 +116,21 @@ static const float kUnfinishedImageProgressCap = 0.999f;
     return progress;
 }
 
-- (TIPImageDecoderAppendResult)appendData:(NSData *)data final:(BOOL)final
+- (void)updateDecoderConfigMap:(nullable NSDictionary<NSString *, id> *)configMap
+{
+    dispatch_async(_renderQueue, ^{
+        self->_decoderConfigMap = [configMap copy];
+    });
+}
+
+- (TIPImageDecoderAppendResult)appendData:(nullable NSData *)data final:(BOOL)final
 {
     __block TIPImageDecoderAppendResult result = TIPImageDecoderAppendResultDidProgress;
 
     dispatch_sync(_renderQueue, ^{
-        result = [self _tip_appendData:data final:final];
+        @autoreleasepool {
+            result = [self _tip_appendData:data final:final];
+        }
     });
 
     return result;
@@ -140,7 +152,8 @@ static const float kUnfinishedImageProgressCap = 0.999f;
                 buffer = [NSMutableData dataWithCapacity:_expectedContentLength];
                 [buffer appendData:data];
             }
-            _decoderContext = [_decoder tip_initiateDecodingWithExpectedDataLength:_expectedContentLength buffer:buffer];
+            id config = _decoderConfigMap[_type];
+            _decoderContext = [_decoder tip_initiateDecoding:config expectedDataLength:_expectedContentLength buffer:buffer];
             _codecDetector = nil;
             return YES;
         }
@@ -151,7 +164,7 @@ static const float kUnfinishedImageProgressCap = 0.999f;
 
 - (TIPImageDecoderAppendResult)_tip_appendData:(NSData *)data final:(BOOL)final
 {
-    if (TIPPartialImageStateComplete == _state) {
+    if (TIPPartialImageStateComplete == self.state) {
         return TIPImageDecoderAppendResultDidCompleteLoading;
     }
 
@@ -185,19 +198,19 @@ static const float kUnfinishedImageProgressCap = 0.999f;
     switch (result) {
         case TIPImageDecoderAppendResultDidLoadHeaders:
         case TIPImageDecoderAppendResultDidLoadFrame:
-            if (_state <= TIPPartialImageStateLoadingImage) {
-                _state = TIPPartialImageStateLoadingImage;
+            if (self.state <= TIPPartialImageStateLoadingImage) {
+                self.state = TIPPartialImageStateLoadingImage;
             }
             break;
         case TIPImageDecoderAppendResultDidCompleteLoading:
-            if (_state <= TIPPartialImageStateComplete) {
-                _state = TIPPartialImageStateComplete;
+            if (self.state <= TIPPartialImageStateComplete) {
+                self.state = TIPPartialImageStateComplete;
             }
             break;
         case TIPImageDecoderAppendResultDidProgress:
         default:
-            if (_state <= TIPPartialImageStateLoadingHeaders) {
-                _state = TIPPartialImageStateLoadingHeaders;
+            if (self.state <= TIPPartialImageStateLoadingHeaders) {
+                self.state = TIPPartialImageStateLoadingHeaders;
             }
             break;
     }
@@ -224,14 +237,16 @@ static const float kUnfinishedImageProgressCap = 0.999f;
     }
 }
 
-- (TIPImageContainer *)renderImageWithMode:(TIPImageDecoderRenderMode)mode decoded:(BOOL)decode
+- (nullable TIPImageContainer *)renderImageWithMode:(TIPImageDecoderRenderMode)mode decoded:(BOOL)decode
 {
     __block TIPImageContainer *image = nil;
 
     dispatch_sync(_renderQueue, ^{
-        image = [self->_decoder tip_renderImage:self->_decoderContext mode:mode];
-        if (image && decode) {
-            [image decode];
+        @autoreleasepool {
+            image = [self->_decoder tip_renderImage:self->_decoderContext mode:mode];
+            if (image && decode) {
+                [image decode];
+            }
         }
     });
 
@@ -352,3 +367,5 @@ static const float kUnfinishedImageProgressCap = 0.999f;
 }
 
 @end
+
+NS_ASSUME_NONNULL_END

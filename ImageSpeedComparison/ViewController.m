@@ -6,6 +6,7 @@
 //  Copyright (c) 2015 Twitter. All rights reserved.
 //
 
+#import <Accelerate/Accelerate.h>
 #import <TwitterImagePipeline/TwitterImagePipeline.h>
 
 #import "TIPTestImageFetchDownloadInternalWithStubbing.h"
@@ -27,8 +28,13 @@ static const ImageTypeStruct sImageTypes[] = {
     { @"public.png",            "PNG",          "twitterfied.png",          NO,     NO  },
     { @"public.tiff",           "TIFF",         "twitterfied.tiff",         NO,     NO  },
     { @"com.compuserve.gif",    "GIF",          "fireworks_original.gif",   NO,     YES },
+    { @"com.google.webp",       "WEBP",         "twitterfied.webp",         NO,     NO  },
+    { @"public.jpeg",           "Small-PJPEG",  "twitterfied.small.pjpg",   YES,    NO  },
 };
 
+static const NSUInteger kBitrateDribble = 4 * 1000;
+static const NSUInteger kBitrate80sModem = 16 * 1000;
+static const NSUInteger kBitrateBad2G = 56 * 1000;
 static const NSUInteger kBitrate2G = 128 * 1000; // 2G
 static const NSUInteger kBitrate2GPlus = kBitrate2G * 2; // 2.5G
 static const NSUInteger kBitrate3G = kBitrate2GPlus * 2; // 3G
@@ -37,14 +43,15 @@ static const NSUInteger kBitrate4G = kBitrate3G * 2; // 4G
 static const NSUInteger kBitrate4GPlus = kBitrate4G * 2; // ~LTE
 
 static const NSUInteger sBitrates[] = {
+    kBitrateDribble, kBitrate80sModem, kBitrateBad2G,
     kBitrate2G, kBitrate2GPlus,
     kBitrate3G, kBitrate3GPlus,
     kBitrate4G, kBitrate4GPlus
 };
 
-static const NSUInteger kDefaultBitrateIndex = 2;
+static const NSUInteger kDefaultBitrateIndex = 5;
 
-@interface ViewController () <UIPickerViewDataSource, UIPickerViewDelegate, TIPImageFetchRequest, TIPImageFetchDelegate>
+@interface ViewController () <UIPickerViewDataSource, UIPickerViewDelegate, TIPImageFetchRequest, TIPImageFetchDelegate, TIPImageFetchTransformer>
 @end
 
 @implementation ViewController
@@ -56,6 +63,7 @@ static const NSUInteger kDefaultBitrateIndex = 2;
     IBOutlet UIButton *_startButton;
     IBOutlet UIPickerView *_pickerView;
     IBOutlet UILabel *_resultsLabel;
+    IBOutlet UISwitch *_blurSwitch;
 
     BOOL _selectingSpeed;
     UITapGestureRecognizer *_tapper;
@@ -313,6 +321,67 @@ static const NSUInteger kDefaultBitrateIndex = 2;
 {
     return _imageView.contentMode;
 }
+
+- (id<TIPImageFetchTransformer>)transformer
+{
+    return _blurSwitch.on ? self : nil;
+}
+
+- (UIImage *)tip_transformImage:(UIImage *)image withProgress:(float)progress hintTargetDimensions:(CGSize)targetDimensions hintTargetContentMode:(UIViewContentMode)targetContentMode forImageFetchOperation:(TIPImageFetchOperation *)op
+{
+    if (!image.CGImage) {
+        return nil;
+    }
+
+    BOOL shouldScaleFirst = NO;
+    const CGSize imageDimension = [image tip_dimensions];
+    CGFloat blurRadius = 0;
+    if (progress < 0 || progress >= 1.f) {
+        // placeholder?
+        id<TIPImageFetchRequest> request = op.request;
+        if (![request respondsToSelector:@selector(options)]) {
+            return nil;
+        }
+        if ((request.options & TIPImageFetchTreatAsPlaceholder) == 0) {
+            return nil;
+        }
+        if (targetDimensions.width <= imageDimension.width && targetDimensions.height <= imageDimension.height) {
+            return nil;
+        }
+        blurRadius = log2(MAX(targetDimensions.height / imageDimension.height, targetDimensions.width / targetDimensions.width));
+        shouldScaleFirst = YES;
+    } else {
+        // progressive
+        if (progress > .65f) {
+            return nil;
+        }
+        const CGFloat divisor = (1.f + progress) * 2.f;
+        blurRadius = log2(MAX(imageDimension.width, imageDimension.height)) / divisor;
+        blurRadius *= 1.f - progress;
+    }
+
+    if (blurRadius < 0.5) {
+        return nil;
+    }
+
+    // TRANSFORM!
+    if (shouldScaleFirst) {
+        image = [image tip_scaledImageWithTargetDimensions:targetDimensions contentMode:targetContentMode];
+    }
+    UIImage *transformed = [image tip_blurredImageWithRadius:blurRadius];
+    NSAssert(CGSizeEqualToSize([image tip_dimensions], [transformed tip_dimensions]), @"sizing missmatch!");
+    return transformed;
+}
+
+- (NSString *)tip_transformerIdentifier
+{
+    return @"speed.test.transformer";
+}
+
+//- (NSDictionary *)progressiveLoadingPolicies
+//{
+//    return @{ TIPImageTypeJPEG : [[TIPGreedyProgressiveLoadingPolicy alloc] init] };
+//}
 
 //- (NSDictionary *)progressiveLoadingPolicies
 //{

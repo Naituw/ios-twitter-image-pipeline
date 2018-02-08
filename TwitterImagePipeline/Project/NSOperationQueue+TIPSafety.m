@@ -8,6 +8,8 @@
 
 #import "NSOperationQueue+TIPSafety.h"
 
+NS_ASSUME_NONNULL_BEGIN
+
 static NSTimeInterval const TIPOperationSafetyGuardRemoveOperationAfterFinishedDelay = 2.0;
 static NSTimeInterval const TIPOperationSafetyGuardCheckForAlreadyFinishedOperationDelay = 1.0;
 
@@ -15,15 +17,18 @@ static NSTimeInterval const TIPOperationSafetyGuardCheckForAlreadyFinishedOperat
 - (void)addOperation:(nonnull NSOperation *)op;
 - (NSSet *)operations;
 + (nullable instancetype)operationSafetyGuard;
-- (nonnull instancetype)init NS_UNAVAILABLE;
-- (nonnull instancetype)new NS_UNAVAILABLE;
+- (instancetype)init NS_UNAVAILABLE;
+- (instancetype)new NS_UNAVAILABLE;
 @end
 
 @implementation NSOperationQueue (TIPSafety)
 
 - (void)tip_safeAddOperation:(NSOperation *)op
 {
-    [[TIPOperationSafetyGuard operationSafetyGuard] addOperation:op];
+    TIPOperationSafetyGuard *guard = [TIPOperationSafetyGuard operationSafetyGuard];
+    if (guard) {
+        [guard addOperation:op];
+    }
     [self addOperation:op];
 }
 
@@ -35,7 +40,7 @@ static NSTimeInterval const TIPOperationSafetyGuardCheckForAlreadyFinishedOperat
     NSMutableSet *_operations;
 }
 
-+ (instancetype)operationSafetyGuard
++ (nullable instancetype)operationSafetyGuard
 {
     static TIPOperationSafetyGuard *sGuard = nil;
     static dispatch_once_t onceToken;
@@ -116,7 +121,7 @@ static NSTimeInterval const TIPOperationSafetyGuardCheckForAlreadyFinishedOperat
  1) we cannot force all implementations of NSOperation to implement code that needs to execute when finishing
  2) swizzling -didChangeValueForKey: would lead to a MAJOR performance degredation (confirmed by Apple)
  */
-- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+- (void)observeValueForKeyPath:(nullable NSString *)keyPath ofObject:(nullable id)object change:(nullable NSDictionary<NSKeyValueChangeKey,id> *)change context:(void * __nullable)context
 {
     if ([keyPath isEqualToString:@"isFinished"] && [change[NSKeyValueChangeNewKey] boolValue]) {
         NSOperation *op = object;
@@ -127,3 +132,5 @@ static NSTimeInterval const TIPOperationSafetyGuardCheckForAlreadyFinishedOperat
 }
 
 @end
+
+NS_ASSUME_NONNULL_END

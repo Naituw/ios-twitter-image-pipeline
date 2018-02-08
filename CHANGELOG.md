@@ -2,13 +2,96 @@
 
 ## Info
 
-**Document version:** 2.2.2
+**Document version:** 2.7.2
 
-**Last updated:** 03/02/2017
+**Last updated:** 10/24/2017
 
 **Author:** Nolan O'Brien
 
 ## History
+
+### 2.7.2
+
+- improve `TIPImageFetchTransformer` support with optional identifier
+  - was easy to get the rendered cache images mixed up between transformed and non-transformed fetches
+  - now, transform requests can only fetch images from the rendered cache if there is a match with the `tip_tranformerIdentifier`
+  - transformers that don't provide an identifier cannot be cached nor retrieved from the rendered cache
+- removed transformer from `TIPGlobalConfiguration` (would interfere with above improvement)
+
+### 2.7.1
+
+- add generic concrete class for `TIPImageFetchRequest` as convenience
+  - generic fetch request is mutable/immutable pair: `TIPGenericImageFetchRequest` and `TIPMutableGenericImageFetchRequest`
+
+### 2.7.0
+
+- add decoder config support
+  - enables custom TIPImageDecoder implementations to have configurable ways of being decoded
+- add memory map loading option for images
+  - default continues to not use memory map loading, but it's now exposed on TIPImageContainer
+- add MP4 decoder to TIP (as an extended decoder, not bundled by default)
+  - decodes MP4s as animated images
+
+### 2.6.0
+
+- Remove `TIPImageView`, just use `UIImageView` category instead
+  - Add `hidden` property support to `UIImageView` fetch helper category
+- Remove `TIPImageViewFetchHelper` subclassing event methods
+  - Use delegate pattern for eventing instead of polymorphism #Simplify
+- Remove `setViewHidden:` method for `TIPImageViewFetchHelper`
+  - It never did what it was advertised to do and muddied the control flow
+- Add `fetchResultDimensions` to `TIPImageViewFetchHelper` for more insight into results
+
+
+
+### 2.5.0
+
+- Remove detached downloads support for TIP image fetches
+  - using HTTP/2 is the ideal solution, removing the complexity to remove the crutch
+
+### 2.4.5
+
+- reduce thread count for TIP by unifying all disk caches to using 1 manifest queue
+  - make disk cache manifest load async instead of sync now that it is shared
+  - no real speed improvements, just fewer threads need to be used in multi-pipeline apps
+- clean up some large inline functions to be regular functions
+
+### 2.4.4 - protosphere
+
+- Fix WebP Encoder (channels could be mixed up)
+
+### 2.4.3
+
+- Update WebP codec to v0.6.0
+
+### 2.4.2
+
+- Add support for changing a cached image's identifier
+
+### 2.4.1 - Brandon Carpenter
+
+- Add category to `UIImageView` for setting a `TIPImageViewFetchHelper`
+  - offers convenience of __TIP__ work encapsulated in `TIPImageViewFetchHelper` without needing to refactor onto `TIPImageView`
+
+### 2.4.0
+
+- Add image transform support to __TIP__
+- A `TIPImageFetchTransform` can be set globally or on a specific request
+- Clean up some nullability notation
+- Update ImageSpeedComparison sample app
+    - add WebP
+    - add more bitrates
+    - add optional blur transform (for progress)
+    - add smaller PJPEG
+
+### 2.3.0
+
+- Reduce memory pressure w/ `@autoreleasepool` blocks on GCD queues in _TIP_
+- Add "problem" for images not caching because they are too large
+- Add "problem" when downloaded image cannot be decoded
+- Add Animated PNG support (iOS 8+)
+- Add the store operation as an argument to `TIPImagePipelineStoreCompletionBlock`
+- Tightened up some threading race conditions that cropped up with the thread sanitizer
 
 ### 2.2.2
 
