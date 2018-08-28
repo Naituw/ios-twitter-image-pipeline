@@ -21,9 +21,36 @@ NS_ASSUME_NONNULL_BEGIN
 
 static CGSize TIPSizeAlignToPixelEx(CGSize size, CGFloat scale);
 
+#pragma mark - Render Format
+
+@interface TIPRenderImageFormatInternal : NSObject <TIPRenderImageFormat>
+@end
+
+@implementation TIPRenderImageFormatInternal
+
+@synthesize prefersExtendedRange = _prefersExtendedRange;
+@synthesize opaque = _opaque;
+@synthesize scale = _scale;
+@synthesize renderSize = _renderSize;
+
+- (instancetype)initWithRendererFormat:(UIGraphicsImageRendererFormat *)format
+{
+    if (self = [self init]) {
+        _prefersExtendedRange = format.prefersExtendedRange;
+        _opaque = format.opaque;
+        _scale = format.scale;
+    }
+    return self;
+}
+
+@end
+
 #pragma mark - Functions
 
-BOOL TIPSizeMatchesTargetSizing(const CGSize size, CGSize targetSize, const UIViewContentMode targetContentMode, const CGFloat scale)
+BOOL TIPSizeMatchesTargetSizing(const CGSize size,
+                                CGSize targetSize,
+                                const UIViewContentMode targetContentMode,
+                                const CGFloat scale)
 {
     if (!TIPSizeGreaterThanZero(targetSize)) {
         return NO;
@@ -53,12 +80,17 @@ BOOL TIPSizeMatchesTargetSizing(const CGSize size, CGSize targetSize, const UIVi
     return CGSizeEqualToSize(targetSize, size);
 }
 
-CGSize TIPDimensionsScaledToTargetSizing(CGSize dimensionsToScale, CGSize targetDimensionsOrZero, UIViewContentMode targetContentMode)
+CGSize TIPDimensionsScaledToTargetSizing(CGSize dimensionsToScale,
+                                         CGSize targetDimensionsOrZero,
+                                         UIViewContentMode targetContentMode)
 {
     return TIPSizeScaledToTargetSizing(dimensionsToScale, targetDimensionsOrZero, targetContentMode, 1);
 }
 
-CGSize TIPSizeScaledToTargetSizing(CGSize sizeToScale, CGSize targetSizeOrZero, UIViewContentMode targetContentMode, CGFloat scale)
+CGSize TIPSizeScaledToTargetSizing(CGSize sizeToScale,
+                                   CGSize targetSizeOrZero,
+                                   UIViewContentMode targetContentMode,
+                                   CGFloat scale)
 {
     if (!TIPSizeGreaterThanZero(targetSizeOrZero)) {
         // no target dimensions, use the source dimensions
@@ -131,14 +163,21 @@ UIImageOrientation TIPUIImageOrientationFromCGImageOrientation(CGImagePropertyOr
     return UIImageOrientationUp;
 }
 
-NSUInteger TIPEstimateMemorySizeOfImageWithSettings(CGSize size, CGFloat scale, NSUInteger componentsPerPixel, NSUInteger frameCount)
+NSUInteger TIPEstimateMemorySizeOfImageWithSettings(CGSize size,
+                                                    CGFloat scale,
+                                                    NSUInteger componentsPerPixel,
+                                                    NSUInteger frameCount)
 {
     const NSUInteger pixels = (NSUInteger)(size.width * scale * size.height * scale);
     return pixels * componentsPerPixel * MAX((NSUInteger)1, frameCount);
 }
 
-static int _TIPImageByteIndexOfAlphaComponent(CGBitmapInfo bitmapInfo, size_t numberOfComponents, BOOL isLeadingByteAlpha);
-static int _TIPImageByteIndexOfAlphaComponent(CGBitmapInfo bitmapInfo, size_t numberOfComponents, BOOL isLeadingByteAlpha)
+static int _TIPImageByteIndexOfAlphaComponent(CGBitmapInfo bitmapInfo,
+                                              size_t numberOfComponents,
+                                              BOOL isLeadingByteAlpha);
+static int _TIPImageByteIndexOfAlphaComponent(CGBitmapInfo bitmapInfo,
+                                              size_t numberOfComponents,
+                                              BOOL isLeadingByteAlpha)
 {
     int alphaByteIndex = -1;
     const uint32_t byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
@@ -252,7 +291,39 @@ BOOL TIPCIImageHasAlpha(CIImage *image, BOOL inspectPixels)
     return YES;
 }
 
-void TIPExecuteCGContextBlock(dispatch_block_t block)
+BOOL TIPMainScreenSupportsWideColorGamut()
+{
+    static BOOL sScreenIsWideGamut = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sScreenIsWideGamut = TIPScreenSupportsWideColorGamut([UIScreen mainScreen]);
+    });
+
+    return sScreenIsWideGamut;
+}
+
+BOOL TIPScreenSupportsWideColorGamut(UIScreen *screen)
+{
+    if (![screen respondsToSelector:@selector(traitCollection)]) {
+        return NO;
+    }
+
+    UITraitCollection *traits = [screen traitCollection];
+    if (![traits respondsToSelector:@selector(displayGamut)]) {
+        return NO;
+    }
+
+    switch ([traits displayGamut]) {
+        case UIDisplayGamutP3:
+            return YES;
+        default:
+            break;
+    }
+
+    return NO;
+}
+
+void TIPExecuteCGContextBlock(dispatch_block_t __attribute__((noescape)) block)
 {
     /*
 
@@ -290,15 +361,125 @@ void TIPExecuteCGContextBlock(dispatch_block_t block)
         const uint64_t startTime = mach_absolute_time();
         const BOOL serialize = config.serializeCGContextAccess;
 
-        if (serialize) {
+        if (serialize && (dispatch_queue_get_label(sContextQueue) != dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL))) {
             tip_dispatch_sync_autoreleasing(sContextQueue, block);
         } else {
             block();
         }
 
         const NSTimeInterval elapsedTime = TIPComputeDuration(startTime, mach_absolute_time());
-        [config accessedCGContext:serialize duration:elapsedTime];
+        [config accessedCGContext:serialize duration:elapsedTime isMainThread:[NSThread isMainThread]];
     }
+}
+
+static UIImage * __nullable _TIPRenderImageLegacy(UIImage * __nullable sourceImage,
+                                                  TIPImageRenderFormattingBlock __nullable __attribute__((noescape)) formatBlock,
+                                                  TIPImageRenderBlock __attribute__((noescape)) renderBlock)
+{
+    __block UIImage *outImage = nil;
+    TIPExecuteCGContextBlock(^{
+        TIPRenderImageFormatInternal *format = [[TIPRenderImageFormatInternal alloc] init];
+        if (sourceImage) {
+            format.renderSize = sourceImage.size;
+            format.scale = sourceImage.scale;
+            format.opaque = ![sourceImage tip_hasAlpha:NO];
+        } else {
+            format.renderSize = CGSizeMake(1, 1);
+            format.scale = [UIScreen mainScreen].scale;
+            format.opaque = NO;
+        }
+        format.prefersExtendedRange = NO;
+
+        if (formatBlock) {
+            formatBlock(format);
+        }
+
+        UIGraphicsBeginImageContextWithOptions(format.renderSize, format.opaque, format.scale);
+        CGContextRef ctx = UIGraphicsGetCurrentContext();
+        renderBlock(sourceImage, ctx);
+        outImage = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+    });
+
+    return outImage;
+}
+
+static UIImage * __nullable _TIPRenderImageModern(UIImage * __nullable sourceImage,
+                                                  TIPImageRenderFormattingBlock __nullable __attribute__((noescape)) formatBlock,
+                                                  TIPImageRenderBlock __attribute__((noescape)) renderBlock)
+{
+    if ([UIGraphicsImageRenderer class] == Nil) {
+        return nil;
+    }
+
+    __block UIImage *outImage = nil;
+    TIPExecuteCGContextBlock(^{
+
+        // Get the renderer format (and size)
+        CGSize size = CGSizeMake(1, 1);
+        UIGraphicsImageRendererFormat *format;
+        if (sourceImage) {
+            format = sourceImage.imageRendererFormat;
+            size = sourceImage.size;
+        } else if (@available(iOS 11.0.1, *)) {
+            format = [UIGraphicsImageRendererFormat preferredFormat];
+        } else if (@available(iOS 11.0.0, *)) {
+            // iOS 11.0.0 GM does have `preferredFormat`, but iOS 11 betas did not (argh!)
+            if ([UIGraphicsImageRenderer respondsToSelector:@selector(preferredFormat)]) {
+                format = [UIGraphicsImageRendererFormat preferredFormat];
+            } else {
+                format = [UIGraphicsImageRendererFormat defaultFormat];
+            }
+        } else {
+            format = [UIGraphicsImageRendererFormat defaultFormat];
+        }
+
+        // Customize format if desired
+        if (formatBlock) {
+
+            // Prep the format mutable object
+            TIPRenderImageFormatInternal *formatInternal = [[TIPRenderImageFormatInternal alloc] initWithRendererFormat:format];
+            formatInternal.renderSize = size;
+
+            // Format the format object
+            formatBlock(formatInternal);
+
+            // Only update the renderer format where there's a difference
+            if (format.opaque != formatInternal.opaque) {
+                format.opaque = formatInternal.opaque;
+            }
+            if (format.prefersExtendedRange != formatInternal.prefersExtendedRange) {
+                format.prefersExtendedRange = formatInternal.prefersExtendedRange;
+            }
+            if (format.scale != formatInternal.scale) {
+                format.scale = (formatInternal.scale == 0.0) ? [UIScreen mainScreen].scale : formatInternal.scale;
+            }
+            size = formatInternal.renderSize;
+        }
+
+        // Render!
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+        outImage = [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull rendererContext) {
+            renderBlock(sourceImage, rendererContext.CGContext);
+        }];
+    });
+
+    return outImage;
+}
+
+UIImage * __nullable TIPRenderImage(UIImage * __nullable sourceImage,
+                                    TIPImageRenderFormattingBlock __nullable __attribute__((noescape)) formatBlock,
+                                    TIPImageRenderBlock __attribute__((noescape)) renderBlock)
+{
+    if (sourceImage.images.count > 1) {
+        return nil;
+    }
+
+    UIImage *outImage = _TIPRenderImageModern(sourceImage, formatBlock, renderBlock);
+    if (!outImage) {
+        outImage = _TIPRenderImageLegacy(sourceImage, formatBlock, renderBlock);
+    }
+    return outImage;
 }
 
 #pragma mark - Statics

@@ -210,8 +210,8 @@ image pipeline works.
   - powerful class that can encapsulate the majority of use cases for loading an image and displaying it in a `UIImageView`
   - 99% of image loading and displaying use cases can be solved by using this class, configuring it and providing a delegate and/or data source
   - having the logic in this class avoid coupling _controller_ code with _view_ code in the _MVC_ practice
-- `UIImageView(TIPImageViewFetchHelper)`
-  - convenience category on `UIImageView` for associating a `TIPImageViewFetchHelper`
+- `UIView(TIPImageFetchable)` and `UIImageView(TIPImageFetchable)`
+  - convenience categories on `UIImageView` and `UIView` for associating a `TIPImageViewFetchHelper`
 
 ## Usage
 
@@ -360,3 +360,12 @@ Inspecting pipelines is asynchronously done on background threads before the ins
 called on the main thread.  This can provide very useful debugging info.  As an example, Twitter has
 built in UI and tools that use the inspection support of *TIP* for internal builds.
 
+# License
+
+Copyright 2015-2018 Twitter, Inc.
+
+Licensed under the Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0
+
+# Security Issues?
+
+Please report sensitive security issues via Twitter's bug-bounty program (https://hackerone.com/twitter) rather than GitHub.

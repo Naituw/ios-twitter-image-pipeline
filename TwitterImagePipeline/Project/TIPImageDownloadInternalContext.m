@@ -15,9 +15,6 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation TIPImageDownloadInternalContext
-{
-    NSMutableArray<id<TIPImageDownloadDelegate>> *_delegates;
-}
 
 - (instancetype)init
 {
@@ -73,28 +70,32 @@ NS_ASSUME_NONNULL_BEGIN
     NSUInteger count = _delegates.count;
     [_delegates removeObject:delegate];
     if (count > _delegates.count) {
-        id<TIPImageFetchDownload> download = self.download;
+        id<TIPImageFetchDownload> download = _download;
         [TIPImageDownloadInternalContext executeDelegate:delegate suspendingQueue:NULL block:^(id<TIPImageDownloadDelegate> blockDelegate) {
             [blockDelegate imageDownload:(id)download didCompleteWithPartialImage:nil lastModified:nil byteSize:0 imageType:nil image:nil imageRenderLatency:0.0 statusCode:0 error:[NSError errorWithDomain:TIPImageFetchErrorDomain code:TIPImageFetchErrorCodeCancelled userInfo:nil]];
         }];
     }
 }
 
-- (void)executePerDelegateSuspendingQueue:(nullable dispatch_queue_t)queue block:(void(^)(id<TIPImageDownloadDelegate>))block;
+- (void)executePerDelegateSuspendingQueue:(nullable dispatch_queue_t)queue
+                                    block:(void(^)(id<TIPImageDownloadDelegate>))block
 {
     for (id<TIPImageDownloadDelegate> delegate in _delegates) {
-        [TIPImageDownloadInternalContext executeDelegate:delegate suspendingQueue:queue block:block];
+        [TIPImageDownloadInternalContext executeDelegate:delegate
+                                         suspendingQueue:queue block:block];
     }
 }
 
-+ (void)executeDelegate:(id<TIPImageDownloadDelegate>)delegate suspendingQueue:(nullable dispatch_queue_t)queue block:(void (^)(id<TIPImageDownloadDelegate>))block;
++ (void)executeDelegate:(id<TIPImageDownloadDelegate>)delegate
+        suspendingQueue:(nullable dispatch_queue_t)queue
+                  block:(void (^)(id<TIPImageDownloadDelegate>))block
 {
     dispatch_queue_t delegateQueue = [delegate respondsToSelector:@selector(imageDownloadDelegateQueue)] ? delegate.imageDownloadDelegateQueue : NULL;
     if (delegateQueue) {
         if (queue) {
             dispatch_suspend(queue);
         }
-        dispatch_async(delegateQueue, ^{
+        tip_dispatch_async_autoreleasing(delegateQueue, ^{
             block(delegate);
             if (queue) {
                 dispatch_resume(queue);

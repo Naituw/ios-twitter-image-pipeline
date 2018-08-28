@@ -147,7 +147,15 @@ NSString * __nullable TIPImageTypeFromUTType(NSString * __nullable utType)
 
     // We check RAW first since RAW camera images can be detected as both RAW and TIFF and we'll bias to RAW
 
-    if ((&kUTTypeRawImage && UTTypeConformsTo(imageType, kUTTypeRawImage)) || [utType isEqualToString:TIPImageTypeRAW]) {
+    BOOL isTypeRawImage;
+#if __IPHONE_8_0 <= __IPHONE_OS_VERSION_MIN_REQUIRED
+    isTypeRawImage = (BOOL)UTTypeConformsTo(imageType, kUTTypeRawImage);
+#else
+    isTypeRawImage = &kUTTypeRawImage && UTTypeConformsTo(imageType, kUTTypeRawImage);
+#endif
+    isTypeRawImage = isTypeRawImage || [utType isEqualToString:TIPImageTypeRAW];
+
+    if (isTypeRawImage) {
         return TIPImageTypeRAW;
     } else if (UTTypeConformsTo(imageType, kUTTypeJPEG)) {
         return TIPImageTypeJPEG;
@@ -204,7 +212,10 @@ TIPRecommendedImageTypeOptions TIPRecommendedImageTypeOptionsFromEncodingOptions
 
 #pragma mark Debug Stuff
 
-NSString * __nullable TIPDetectImageType(NSData *data, TIPImageEncodingOptions * __nullable optionsOut, NSUInteger * __nullable animationFrameCountOut, BOOL hasCompleteImageData)
+NSString * __nullable TIPDetectImageType(NSData *data,
+                                         TIPImageEncodingOptions * __nullable optionsOut,
+                                         NSUInteger * __nullable animationFrameCountOut,
+                                         BOOL hasCompleteImageData)
 {
     NSString *type = nil;
 

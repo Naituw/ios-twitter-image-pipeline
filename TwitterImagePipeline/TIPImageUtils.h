@@ -15,6 +15,21 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+#pragma mark Render Support
+
+//! protocol for the format of how to render.  Provided to the _renderFormat_ block of `TIPRenderImage` and supports read and write.
+@protocol TIPRenderImageFormat <NSObject>
+@property (nonatomic) BOOL opaque;
+@property (nonatomic) BOOL prefersExtendedRange;
+@property (nonatomic) CGFloat scale;
+@property (nonatomic) CGSize renderSize;
+@end
+
+//! Block to configure a render format
+typedef void(^TIPImageRenderFormattingBlock)(id<TIPRenderImageFormat> format);
+//! Block to perform rendering.  _sourceImage_ if there was an image sourcing the render.
+typedef void(^TIPImageRenderBlock)(UIImage * __nullable sourceImage, CGContextRef ctx);
+
 #pragma mark Constants
 
 /**
@@ -82,22 +97,68 @@ NS_INLINE CGSize TIPDimensionsFromImage(UIImage * __nullable image)
     return TIPDimensionsFromSizeScaled(image.size, image.scale);
 }
 
-//! Get size from dimensions (pixels)
-NS_INLINE CGSize TIPSizeScaledFromDimensions(CGSize dimensions, CGFloat scale)
-{
-    if (scale <= 0.0) {
-        scale = [UIScreen mainScreen].scale;
-    }
-
-    dimensions.width /= scale;
-    dimensions.height /= scale;
-    return dimensions;
-}
-
 //! Get size (in points based on screen scale) from dimensions (in pixels)
 NS_INLINE CGSize TIPDimensionsToPointSize(CGSize dimensions)
 {
     return TIPDimensionsToSizeScaled(dimensions, 0);
+}
+
+//! Get dimensions (in pixels) from size (in points based on screen scale)
+NS_INLINE CGSize TIPDimensionsFromPointSize(CGSize size)
+{
+    return TIPDimensionsFromSizeScaled(size, 0);
+}
+
+//! Get a new size from an existing one by adjusting the scale
+NS_INLINE CGSize TIPSizeByAdjustingScale(CGSize size, CGFloat oldScale, CGFloat newScale)
+{
+    if (oldScale == 0.0f) {
+        oldScale = [UIScreen mainScreen].scale;
+    }
+    if (newScale == 0.0f) {
+        newScale = [UIScreen mainScreen].scale;
+    }
+
+    if (oldScale == newScale) {
+        return size;
+    }
+
+    size.width *= oldScale;
+    size.height *= oldScale;
+    size.width /= newScale;
+    size.height /= newScale;
+
+    return size;
+}
+
+//! Get a new size from an existing one by adjusting the scale
+NS_INLINE CGPoint TIPPointByAdjustingScale(CGPoint point, CGFloat oldScale, CGFloat newScale)
+{
+    if (oldScale == 0.0f) {
+        oldScale = [UIScreen mainScreen].scale;
+    }
+    if (newScale == 0.0f) {
+        newScale = [UIScreen mainScreen].scale;
+    }
+
+    if (oldScale == newScale) {
+        return point;
+    }
+
+    point.x *= oldScale;
+    point.y *= oldScale;
+    point.x /= newScale;
+    point.y /= newScale;
+
+    return point;
+}
+
+//! Get a new rect from an existing one by adjusting the scale
+NS_INLINE CGRect TIPRectByAdjustingScale(CGRect rect, CGFloat oldScale, CGFloat newScale)
+{
+    rect.size = TIPSizeByAdjustingScale(rect.size, oldScale, newScale);
+    rect.origin = TIPPointByAdjustingScale(rect.origin, oldScale, newScale);
+    return rect;
 }
 
 //! Does the `UIViewContentMode` scale?
@@ -135,6 +196,12 @@ FOUNDATION_EXTERN BOOL TIPSizeMatchesTargetSizing(CGSize size,
 FOUNDATION_EXTERN BOOL TIPCGImageHasAlpha(CGImageRef imageRef, BOOL inspectPixels);
 //! Best effort alpha check on a `CIImage`
 FOUNDATION_EXTERN BOOL TIPCIImageHasAlpha(CIImage *image, BOOL inspectPixels);
+
+//! Does the given screen support wide gamut color (aka P3)?
+FOUNDATION_EXTERN BOOL TIPScreenSupportsWideColorGamut(UIScreen *screen);
+//! Does the main screen support wide gamut color (aka P3)?
+FOUNDATION_EXTERN BOOL TIPMainScreenSupportsWideColorGamut(void) __attribute__((const));
+
 /**
  Scale a size to target sizing info
  @note only _targetContentMode_ values that have `UIViewContentModeScale*` will be scaled (others are just positional and do not scale)
@@ -160,6 +227,18 @@ FOUNDATION_EXTERN UIImageOrientation TIPUIImageOrientationFromCGImageOrientation
  When `[TIPGlobalConfiguration serializeCGContextAccess]` is `YES`, this function will serialize
  execution across threads.
  */
-FOUNDATION_EXTERN void TIPExecuteCGContextBlock(dispatch_block_t block);
+FOUNDATION_EXTERN void TIPExecuteCGContextBlock(dispatch_block_t __attribute__((noescape)) block);
+
+/**
+ Render to a `UIImage` (using the `TIPExecuteCGContextBlock` call under the hood)
+ @param sourceImage the image to source the render off of, can provide `nil` to source off device defaults
+ @param formatBlock the block to configure the formatting of the render
+ @param renderBlock the block to perform the rendering
+ @return the rendered `UIImage` or `nil`
+ @note a _sourceImage_ that is an animation will yield `nil`
+ */
+FOUNDATION_EXTERN UIImage * __nullable TIPRenderImage(UIImage * __nullable sourceImage,
+                                                      TIPImageRenderFormattingBlock __nullable __attribute__((noescape)) formatBlock,
+                                                      TIPImageRenderBlock __attribute__((noescape)) renderBlock);
 
 NS_ASSUME_NONNULL_END

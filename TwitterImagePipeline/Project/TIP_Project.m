@@ -43,7 +43,7 @@ NSString * const TIPProblemInfoKeyImageIsAnimated = @"animated";
 
 NSString *TIPVersion()
 {
-    return @"2.7";
+    return @"2.9";
 }
 
 void TIPSwizzle(Class cls, SEL originalSelector, SEL swizzledSelector)
@@ -153,7 +153,8 @@ dispatch_block_t __nullable TIPStartBackgroundTask(NSString * __nullable name)
                 taskId = UIBackgroundTaskInvalid;
             }
         };
-        taskId = [[UIApplicationClass sharedApplication] beginBackgroundTaskWithName:name expirationHandler:clearTaskBlock];
+        taskId = [[UIApplicationClass sharedApplication] beginBackgroundTaskWithName:name
+                                                                   expirationHandler:clearTaskBlock];
     }
     return clearTaskBlock;
 }

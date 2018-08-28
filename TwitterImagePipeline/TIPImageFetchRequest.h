@@ -17,14 +17,17 @@ NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXTERN const NSTimeInterval TIPTimeToLiveDefault; // 30 days
 
 //! Block to call with the hydrated `NSURLRequest` when hydration is triggered
-typedef void(^TIPImageFetchHydrationCompletionBlock)(NSURLRequest * __nullable hydratedRequest, NSError * __nullable error);
+typedef void(^TIPImageFetchHydrationCompletionBlock)(NSURLRequest * __nullable hydratedRequest,
+                                                     NSError * __nullable error);
 
 //! Block to hydrate an `NSURLRequest` for a given _context_
-typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest *requestToHydrate, id<TIPImageFetchOperationUnderlyingContext> context, TIPImageFetchHydrationCompletionBlock complete);
+typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest *requestToHydrate,
+                                           id<TIPImageFetchOperationUnderlyingContext> context,
+                                           TIPImageFetchHydrationCompletionBlock complete);
 
 /** Options for a `TIPImageFetchRequest` */
- typedef NS_OPTIONS(NSInteger, TIPImageFetchOptions)
- {
+typedef NS_OPTIONS(NSInteger, TIPImageFetchOptions)
+{
     /** No options - default behavior */
     TIPImageFetchNoOptions = 0,
     /** Don't reset the expiry when accessed */
@@ -159,6 +162,19 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest *requestToHydrate, id<TI
 
 @end
 
+///! Convenience function to get the imageIdentifier from a `TIPImageFetchRequest`
+NS_INLINE NSString *TIPImageFetchRequestGetImageIdentifier(id<TIPImageFetchRequest> request)
+{
+    NSString *imageIdentifier = nil;
+    if ([request respondsToSelector:@selector(imageIdentifier)]) {
+        imageIdentifier = request.imageIdentifier;
+    }
+    if (!imageIdentifier) {
+        imageIdentifier = request.imageURL.absoluteString;
+    }
+    return imageIdentifier;
+}
+
 @class TIPMutableGenericImageFetchRequest;
 
 /**
@@ -178,7 +194,10 @@ typedef void(^TIPImageFetchHydrationBlock)(NSURLRequest *requestToHydrate, id<TI
 @property (nonatomic, readonly, copy, nullable) TIPImageFetchHydrationBlock imageRequestHydrationBlock;
 @property (nonatomic, readonly, copy, nullable) NSDictionary<NSString *, id> *decoderConfigMap;
 
-- (instancetype)initWithImageURL:(NSURL *)imageURL identifier:(nullable NSString *)imageIdentifier targetDimensions:(CGSize)dims targetContentMode:(UIViewContentMode)mode;
+- (instancetype)initWithImageURL:(NSURL *)imageURL
+                      identifier:(nullable NSString *)imageIdentifier
+                targetDimensions:(CGSize)dims
+               targetContentMode:(UIViewContentMode)mode;
 - (instancetype)initWithImageURL:(NSURL *)imageURL NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

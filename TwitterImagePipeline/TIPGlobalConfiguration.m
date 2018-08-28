@@ -49,17 +49,17 @@ static BOOL sUITraitCollectionIsSwizzled = NO;
 + (UITraitCollection *)tip_traitCollectionWithDisplayScale:(CGFloat)scale;
 @end
 
-NS_INLINE SInt64 TIPMaxBytesForAllRenderedCachesDefaultValue()
+NS_INLINE SInt64 _MaxBytesForAllRenderedCachesDefaultValue()
 {
     return (SInt64)MIN([[NSProcessInfo processInfo] physicalMemory] / MAX_MEMORY_BYTES_DIVISOR, MAX_MEMORY_BYTES_CAP);
 }
 
-NS_INLINE SInt64 TIPMaxBytesForAllMemoryCachesDefaultValue()
+NS_INLINE SInt64 _MaxBytesForAllMemoryCachesDefaultValue()
 {
     return (SInt64)MIN([[NSProcessInfo processInfo] physicalMemory] / MAX_MEMORY_BYTES_DIVISOR, MAX_MEMORY_BYTES_CAP);
 }
 
-NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
+NS_INLINE SInt64 _MaxBytesForAllDiskCachesDefaultValue()
 {
     return (SInt64)MAX_DISK_BYTES;
 }
@@ -114,9 +114,9 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 - (nonnull instancetype)initInternal
 {
     if (self = [super init]) {
-        _internalMaxBytesForAllDiskCaches = TIPMaxBytesForAllDiskCachesDefaultValue();
-        _internalMaxBytesForAllMemoryCaches = TIPMaxBytesForAllMemoryCachesDefaultValue();
-        _internalMaxBytesForAllRenderedCaches = TIPMaxBytesForAllRenderedCachesDefaultValue();
+        _internalMaxBytesForAllDiskCaches = _MaxBytesForAllDiskCachesDefaultValue();
+        _internalMaxBytesForAllMemoryCaches = _MaxBytesForAllMemoryCachesDefaultValue();
+        _internalMaxBytesForAllRenderedCaches = _MaxBytesForAllRenderedCachesDefaultValue();
 
         _internalMaxCountForAllDiskCaches = TIPMaxCountForAllDiskCachesDefault;
         _internalMaxCountForAllMemoryCaches = TIPMaxCountForAllMemoryCachesDefault;
@@ -144,12 +144,17 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
         _globalObservers = [NSHashTable<id<TIPImagePipelineObserver>> weakObjectsHashTable];
         self.imageFetchDownloadProvider = nil;
 
+        (void)TIPIsExtension(); // cache if we're an extension
+
         if ([UITraitCollection class]) {
             [UITraitCollection tip_fixTraitCollectionContructorIfNeeded];
         }
 
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-        [nc addObserver:self selector:@selector(_tip_applicationDidEnterBackground) name:UIApplicationDidEnterBackgroundNotification object:nil];
+        [nc addObserver:self
+               selector:@selector(_tip_applicationDidEnterBackground)
+                   name:UIApplicationDidEnterBackgroundNotification
+                 object:nil];
     }
     return self;
 }
@@ -167,10 +172,10 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 - (void)setMaxBytesForAllRenderedCaches:(SInt64)maxBytes
 {
     if ([NSThread isMainThread]) {
-        self.internalMaxBytesForAllRenderedCaches = (maxBytes >= 0ll) ? maxBytes : TIPMaxBytesForAllRenderedCachesDefaultValue();
+        self.internalMaxBytesForAllRenderedCaches = (maxBytes >= 0ll) ? maxBytes : _MaxBytesForAllRenderedCachesDefaultValue();
         [self pruneAllCachesOfType:TIPImageCacheTypeRendered withPriorityCache:nil];
     } else {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        tip_dispatch_async_autoreleasing(dispatch_get_main_queue(), ^{
             self.maxBytesForAllRenderedCaches = maxBytes;
         });
     }
@@ -190,7 +195,7 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
         self.internalMaxCountForAllRenderedCaches = (maxCount >= 0) ? maxCount : TIPMaxCountForAllRenderedCachesDefault;
         [self pruneAllCachesOfType:TIPImageCacheTypeRendered withPriorityCache:nil];
     } else {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        tip_dispatch_async_autoreleasing(dispatch_get_main_queue(), ^{
             self.maxCountForAllRenderedCaches = maxCount;
         });
     }
@@ -207,7 +212,7 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 - (void)setMaxBytesForAllMemoryCaches:(SInt64)maxBytes
 {
     tip_dispatch_async_autoreleasing(_queueForMemoryCaches, ^{
-        self.internalMaxBytesForAllMemoryCaches = (maxBytes >= 0ll) ? maxBytes : TIPMaxBytesForAllMemoryCachesDefaultValue();
+        self.internalMaxBytesForAllMemoryCaches = (maxBytes >= 0ll) ? maxBytes : _MaxBytesForAllMemoryCachesDefaultValue();
         [self pruneAllCachesOfType:TIPImageCacheTypeMemory withPriorityCache:nil];
     });
 }
@@ -241,7 +246,7 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 - (void)setMaxBytesForAllDiskCaches:(SInt64)maxBytes
 {
     tip_dispatch_async_autoreleasing(_queueForDiskCaches, ^{
-        self.internalMaxBytesForAllDiskCaches = (maxBytes >= 0ll) ? maxBytes : TIPMaxBytesForAllDiskCachesDefaultValue();
+        self.internalMaxBytesForAllDiskCaches = (maxBytes >= 0ll) ? maxBytes : _MaxBytesForAllDiskCachesDefaultValue();
         [self pruneAllCachesOfType:TIPImageCacheTypeDisk withPriorityCache:nil];
     });
 }
@@ -336,11 +341,27 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
     }
 }
 
-- (void)clearAllMemoryCaches;
+- (void)clearAllMemoryCaches
 {
     NSArray *pipelines = [TIPImagePipeline allRegisteredImagePipelines].allValues;
     for (TIPImagePipeline *pipeline in pipelines) {
         [pipeline clearMemoryCaches];
+    }
+}
+
+- (void)clearAllRenderedMemoryCaches
+{
+    NSArray *pipelines = [TIPImagePipeline allRegisteredImagePipelines].allValues;
+    for (TIPImagePipeline *pipeline in pipelines) {
+        [pipeline.renderedCache clearAllImages:NULL];
+    }
+}
+
+- (void)clearAllRenderedMemoryCacheImagesWithIdentifier:(NSString *)identifier
+{
+    NSArray *pipelines = [TIPImagePipeline allRegisteredImagePipelines].allValues;
+    for (TIPImagePipeline *pipeline in pipelines) {
+        [pipeline clearRenderedMemoryCacheImageWithIdentifier:identifier];
     }
 }
 
@@ -363,7 +384,7 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 - (NSArray<id<TIPImagePipelineObserver>> *)allImagePipelineObservers
 {
     __block NSArray<id<TIPImagePipelineObserver>> *observers;
-    dispatch_sync(_globalObserversQueue, ^{
+    tip_dispatch_sync_autoreleasing(_globalObserversQueue, ^{
         observers = self->_globalObservers.allObjects;
     });
     return observers;
@@ -467,11 +488,11 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
     }
 }
 
-- (void)accessedCGContext:(BOOL)seriallyAccessed duration:(NSTimeInterval)duration
+- (void)accessedCGContext:(BOOL)seriallyAccessed duration:(NSTimeInterval)duration isMainThread:(BOOL)mainThread
 {
     id<TIPProblemObserver> observer = self.problemObserver;
-    if (observer && [observer respondsToSelector:@selector(tip_CGContextAccessed:serially:)]) {
-        [observer tip_CGContextAccessed:duration serially:seriallyAccessed];
+    if (observer && [observer respondsToSelector:@selector(tip_CGContextAccessed:serially:fromMainThread:)]) {
+        [observer tip_CGContextAccessed:duration serially:seriallyAccessed fromMainThread:mainThread];
     }
 }
 
@@ -622,7 +643,9 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
     TIPAssert(imageFetchDownloadProvider != nil);
     id<TIPImageFetchDownload> download = [imageFetchDownloadProvider imageFetchDownloadWithContext:context];
     if (context != download.context) {
-        @throw [NSException exceptionWithName:TIPImageFetchDownloadConstructorExceptionName reason:@"TIPImageFetchDownload did not adhere to protocol requirements!" userInfo:@{ @"className" : NSStringFromClass([imageFetchDownloadProvider class]) }];
+        @throw [NSException exceptionWithName:TIPImageFetchDownloadConstructorExceptionName
+                                       reason:@"TIPImageFetchDownload did not adhere to protocol requirements!"
+                                     userInfo:@{ @"className" : NSStringFromClass([imageFetchDownloadProvider class]) }];
     }
     return download;
 }
@@ -665,9 +688,12 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 {
     if (self.clearMemoryCachesOnApplicationBackgroundEnabled) {
 
-        TIPStartMethodScopedBackgroundTask();
+        TIPStartMethodScopedBackgroundTask(PruneRenderedCachesOnAppBackground);
 
-        [self pruneAllCachesOfType:TIPImageCacheTypeRendered withPriorityCache:nil toGlobalMaxBytes:[self internalMaxBytesForAllRenderedCaches] / 2 toGlobalMaxCount:0];
+        [self pruneAllCachesOfType:TIPImageCacheTypeRendered
+                 withPriorityCache:nil
+                  toGlobalMaxBytes:[self internalMaxBytesForAllRenderedCaches] / 2
+                  toGlobalMaxCount:0];
         // Memory caches are cleared per pipeline
     }
 }
@@ -676,7 +702,8 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 
 @implementation TIPGlobalConfiguration (Inspect)
 
-- (void)getAllFetchOperations:(out NSArray<TIPImageFetchOperation *> * __nullable * __nullable)fetchOpsOut allStoreOperations:(out NSArray<TIPImageStoreOperation *> * __nullable * __nullable)storeOpsOut
+- (void)getAllFetchOperations:(out NSArray<TIPImageFetchOperation *> * __nullable * __nullable)fetchOpsOut
+           allStoreOperations:(out NSArray<TIPImageStoreOperation *> * __nullable * __nullable)storeOpsOut
 {
     NSMutableArray<TIPImageFetchOperation *> *fetchOps = [[NSMutableArray alloc] init];
     NSMutableArray<TIPImageStoreOperation *> *storeOps = [[NSMutableArray alloc] init];
@@ -699,16 +726,19 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
 
 - (void)inspect:(TIPGlobalConfigurationInspectionCallback)callback
 {
-    NSMutableDictionary *pipelines = [[TIPImagePipeline allRegisteredImagePipelines] mutableCopy];
-    NSMutableDictionary *results = [NSMutableDictionary dictionaryWithCapacity:pipelines.count];
-    [self _tip_inspectRemainingPipelines:pipelines gatheredResults:results callback:callback];
+    NSMutableDictionary<NSString *, TIPImagePipeline *> *pipelines = [[TIPImagePipeline allRegisteredImagePipelines] mutableCopy];
+    NSMutableDictionary<NSString *, TIPImagePipelineInspectionResult *> *results = [NSMutableDictionary dictionaryWithCapacity:pipelines.count];
+
+    _Inspect(pipelines, results, callback);
 }
 
-- (void)_tip_inspectRemainingPipelines:(NSMutableDictionary *)remainingPipelines gatheredResults:(NSMutableDictionary *)results callback:(TIPGlobalConfigurationInspectionCallback)callback
+static void _Inspect(NSMutableDictionary<NSString *, TIPImagePipeline *> *remainingPipelines,
+                     NSMutableDictionary<NSString *, TIPImagePipelineInspectionResult *> *gatheredResults,
+                     TIPGlobalConfigurationInspectionCallback callback)
 {
     NSString *identifier = remainingPipelines.allKeys.firstObject;
     if (!identifier) {
-        callback(results);
+        callback(gatheredResults);
         return;
     }
 
@@ -716,9 +746,11 @@ NS_INLINE SInt64 TIPMaxBytesForAllDiskCachesDefaultValue()
     [remainingPipelines removeObjectForKey:identifier];
     [pipeline inspect:^(TIPImagePipelineInspectionResult *result) {
         if (result) {
-            results[identifier] = result;
+            gatheredResults[identifier] = result;
         }
-        [self _tip_inspectRemainingPipelines:remainingPipelines gatheredResults:results callback:callback];
+        _Inspect(remainingPipelines,
+                 gatheredResults,
+                 callback);
     }];
 }
 
